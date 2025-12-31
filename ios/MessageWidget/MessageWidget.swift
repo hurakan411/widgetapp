@@ -309,7 +309,7 @@ struct MessageWidgetEntryView : View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TaskGridView(tasks: entry.tasks, family: family)
+                TaskGridView(tasks: entry.tasks, family: family, mode: entry.mode)
             }
         }
         .padding(12)
@@ -339,6 +339,7 @@ struct MessageWidgetEntryView : View {
 struct TaskGridView: View {
     let tasks: [Task]
     let family: WidgetFamily
+    let mode: TaskMode
     
     var body: some View {
         GeometryReader { geo in
@@ -382,13 +383,20 @@ struct TaskGridView: View {
     
     @ViewBuilder
     func taskButton(for task: Task, width: CGFloat, height: CGFloat) -> some View {
-        if #available(iOS 17.0, *) {
-            Button(intent: ToggleTaskIntent(taskId: task.id)) {
+        // Only allow interaction for My Tasks
+        if mode == .me {
+            if #available(iOS 17.0, *) {
+                Button(intent: ToggleTaskIntent(taskId: task.id)) {
+                    TaskCardView(task: task)
+                }
+                .buttonStyle(.plain)
+                .frame(width: width, height: height)
+            } else {
                 TaskCardView(task: task)
+                    .frame(width: width, height: height)
             }
-            .buttonStyle(.plain)
-            .frame(width: width, height: height)
         } else {
+            // Read-only for partners
             TaskCardView(task: task)
                 .frame(width: width, height: height)
         }

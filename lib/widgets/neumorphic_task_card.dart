@@ -7,6 +7,7 @@ class NeumorphicTaskCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onEdit;
   final String? partnerName;
+  final bool isReadOnly;
 
   const NeumorphicTaskCard({
     Key? key,
@@ -14,12 +15,13 @@ class NeumorphicTaskCard extends StatelessWidget {
     required this.onTap,
     required this.onEdit,
     this.partnerName,
+    this.isReadOnly = false,
   }) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: isReadOnly ? null : onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeInOut,
@@ -105,7 +107,7 @@ class NeumorphicTaskCard extends StatelessWidget {
                     )
                   else
                     Text(
-                      "TAP TO DONE",
+                      isReadOnly ? "VIEW ONLY" : "TAP TO DONE",
                       style: TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.bold,
@@ -117,35 +119,36 @@ class NeumorphicTaskCard extends StatelessWidget {
               ),
             ),
 
-            // Edit Button
-            GestureDetector(
-              onTap: onEdit,
-              child: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.background,
-                  // Add subtle shadow for visibility
-                  boxShadow: [
-                    const BoxShadow(
-                      color: Colors.white,
-                      offset: Offset(-2, -2),
-                      blurRadius: 3,
-                    ),
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
-                      offset: const Offset(2, 2),
-                      blurRadius: 3,
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.edit,
-                  size: 16,
-                  color: AppColors.textSecondary,
+            // Edit Button (Hide if ReadOnly)
+            if (!isReadOnly)
+              GestureDetector(
+                onTap: onEdit,
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: AppColors.background,
+                    // Add subtle shadow for visibility
+                    boxShadow: [
+                      const BoxShadow(
+                        color: Colors.white,
+                        offset: Offset(-2, -2),
+                        blurRadius: 3,
+                      ),
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.1),
+                        offset: const Offset(2, 2),
+                        blurRadius: 3,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.edit,
+                    size: 16,
+                    color: AppColors.textSecondary,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),

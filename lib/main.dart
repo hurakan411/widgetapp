@@ -694,6 +694,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onTap: () => _toggleTask(task.id, partnerId),
                 onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
                 partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
+                isReadOnly: isPartnerPage,
               );
             },
           ),
