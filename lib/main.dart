@@ -3,23 +3,33 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import 'constants/config.dart';
 import 'constants/design.dart';
 import 'models/task.dart';
+import 'services/supabase_service.dart';
+import 'widgets/background_pattern.dart';
 import 'widgets/neumorphic_task_card.dart';
+import 'widgets/progress_header.dart';
 
 // Placeholder credentials
 const String appGroupId = 'group.com.shashinoguchi.widgetTask';
-const String widgetName = 'MessageWidget';
+const String iOSWidgetName = 'MessageWidget';
 
 // Keys
-const String myTasksKey = 'my_tasks_key';
 const String partnerTasksKey = 'partner_tasks_key';
 const String partnerIdKey = 'partner_user_id';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  await Supabase.initialize(
+    url: AppConfig.supabaseUrl,
+    anonKey: AppConfig.supabaseAnonKey,
+  );
+  
   await HomeWidget.setAppGroupId(appGroupId);
   runApp(const OmamoriApp());
 }
@@ -53,218 +63,129 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
-
-  // Data
-  List<Task> _myTasks = [];
-  // Map partner ID to their task list
-  Map<String, List<Task>> _partnerTasksMap = {};
-  List<String> _partnerIds = [];
-  Map<String, String> _partnerNames = {}; // Map ID to Nickname
   
-  final Uuid _uuid = const Uuid();
+  // Partner Management
+  List<String> _partnerIds = [];
+  Map<String, String> _partnerNames = {}; // ID -> Nickname
+
+  // Service
+  final _supabaseService = SupabaseService();
+  
+  Stream<List<Task>>? _myTasksStream;
 
   @override
   void initState() {
     super.initState();
-    _loadAllData();
+    _initializeSupabase();
+    // Setup widget
+    HomeWidget.setAppGroupId(appGroupId);
   }
 
-  Future<void> _loadAllData() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _partnerIds = prefs.getStringList('partner_ids') ?? [];
-      // Load names
-      String? namesJson = prefs.getString('partner_names');
-      if (namesJson != null) {
-        _partnerNames = Map<String, String>.from(jsonDecode(namesJson));
+  Future<void> _initializeSupabase() async {
+    await _supabaseService.signInAnonymously();
+    
+    // Ensure profile exists
+    final user = _supabaseService.currentUser;
+    if (user != null) {
+      // Check if nickname exists, if not set default
+      final nickname = await _supabaseService.getNickname(user.id);
+      if (nickname == null) {
+        await _supabaseService.updateProfile("User_${user.id.substring(0, 4)}");
       }
-    });
-
-    // Load My Tasks (Mock)
-    if (_myTasks.isEmpty) {
+      
+      // Initialize Stream
       setState(() {
-        _myTasks = [
-          Task(id: _uuid.v4(), title: 'Morning Medicine', createdAt: DateTime.now(), resetType: ResetType.daily, resetValue: 400),
-          Task(id: _uuid.v4(), title: 'Lock the Door', createdAt: DateTime.now()),
-        ];
+        _myTasksStream = _supabaseService.getTasksStream();
       });
     }
 
-    // Load Partner Tasks (Mock for each partner)
-    for (String pid in _partnerIds) {
-      if (!_partnerTasksMap.containsKey(pid)) {
-        _partnerTasksMap[pid] = [
-          Task(id: _uuid.v4(), title: 'Partner Task 1', createdAt: DateTime.now()),
-          Task(id: _uuid.v4(), title: 'Partner Task 2', createdAt: DateTime.now()),
-        ];
-      }
-    }
-    
-    _checkAndResetTasks(); // Check for expired tasks
-    _syncWidget();
+    await _loadPartners();
   }
 
-  Future<void> _updatePartners(List<String> newIds, Map<String, String> newNames) async {
+  Future<void> _loadPartners() async {
+    // Load partners from Supabase
+    final ids = await _supabaseService.getPartnerIds();
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('partner_ids', newIds);
-    await prefs.setString('partner_names', jsonEncode(newNames));
     
-    setState(() {
-      _partnerIds = newIds;
-      _partnerNames = newNames;
+    Map<String, String> names = {};
+    for (var id in ids) {
+      // Check local nickname first
+      String? name = prefs.getString('partner_nickname_$id');
       
-      // Initialize task list for new partners if needed
-      for (String pid in newIds) {
-        if (!_partnerTasksMap.containsKey(pid)) {
-          _partnerTasksMap[pid] = [];
-        }
+      if (name == null) {
+        // Fallback to Supabase profile nickname
+        name = await _supabaseService.getNickname(id);
       }
-      // Cleanup removed partners
-      _partnerTasksMap.removeWhere((key, value) => !newIds.contains(key));
+      
+      names[id] = name ?? "Partner";
+    }
+
+    setState(() {
+      _partnerIds = ids;
+      _partnerNames = names;
     });
-    _syncWidget();
   }
 
-  // Check if any done tasks should be reset
-  void _checkAndResetTasks() {
-    final now = DateTime.now();
-    bool changed = false;
+  // --- Task Operations (Supabase) ---
 
-    void checkList(List<Task> list) {
-      for (int i = 0; i < list.length; i++) {
-        final task = list[i];
-        if (task.isDone && task.scheduledResetAt != null && now.isAfter(task.scheduledResetAt!)) {
-          list[i] = task.copyWith(
-            isDone: false,
-            doneAt: null,
-            scheduledResetAt: null,
-          );
-          changed = true;
-          debugPrint('Task "${task.title}" auto-reset.');
-        }
-      }
-    }
-
-    checkList(_myTasks);
-    _partnerTasksMap.values.forEach(checkList);
-
-    if (changed) {
-      setState(() {});
-      _syncWidget();
-    }
+  void _addTask(String title, String? targetPartnerId) async {
+    await _supabaseService.addTask(title, targetPartnerId);
+    _updateWidget();
   }
 
-  // --- Task Management ---
+  void _toggleTask(String taskId, bool currentStatus) async {
+    // Optimistic update not strictly needed with StreamBuilder, but good for UX.
+    // However, StreamBuilder will handle the UI update automatically.
+    await _supabaseService.toggleTask(taskId, !currentStatus);
+    _updateWidget();
+  }
 
-  void _addTask(String title, String? partnerId, ResetType resetType, int? resetValue, String? targetPartnerId) {
-    final newTask = Task(
-      id: _uuid.v4(),
-      title: title,
-      createdAt: DateTime.now(),
-      resetType: resetType,
-      resetValue: resetValue,
-      targetPartnerId: targetPartnerId,
+  void _editTask(String taskId, String newTitle) async {
+    await _supabaseService.updateTaskTitle(taskId, newTitle);
+    _updateWidget();
+  }
+
+  void _deleteTask(String taskId) async {
+    await _supabaseService.deleteTask(taskId);
+    _updateWidget();
+  }
+
+  void _updateWidget() {
+    // Sync logic for widget needs to be adapted for Supabase data.
+    // Since we don't have local list readily available here without stream,
+    // we might need to fetch latest tasks to update widget.
+    // For now, let's leave this placeholder or implement a fetch.
+    // Ideally, the widget should fetch from Supabase directly or we sync periodically.
+    // Given the widget code uses UserDefaults, we should fetch and save to UserDefaults.
+    _syncToWidget();
+  }
+
+  Future<void> _syncToWidget() async {
+    // Fetch my tasks
+    final myTasksStream = _supabaseService.getTasksStream();
+    final myTasks = await myTasksStream.first; // Get current snapshot
+    
+    await HomeWidget.saveWidgetData(
+      'my_tasks_key',
+      jsonEncode(myTasks.map((t) => t.toJson()).toList()),
     );
-
-    setState(() {
-      if (partnerId != null) {
-        if (_partnerTasksMap.containsKey(partnerId)) {
-          _partnerTasksMap[partnerId]!.add(newTask);
-        }
-      } else {
-        _myTasks.add(newTask);
-      }
-    });
-    _syncWidget();
-  }
-
-  void _editTask(String id, String? partnerId, String newTitle, ResetType newResetType, int? newResetValue, String? newTargetPartnerId) {
-    setState(() {
-      final list = partnerId != null ? _partnerTasksMap[partnerId] : _myTasks;
-      if (list != null) {
-        final index = list.indexWhere((t) => t.id == id);
-        if (index != -1) {
-          final oldTask = list[index];
-          list[index] = oldTask.copyWith(
-            title: newTitle,
-            resetType: newResetType,
-            resetValue: newResetValue,
-            targetPartnerId: newTargetPartnerId,
-          );
-        }
-      }
-    });
-    _syncWidget();
-  }
-
-  void _toggleTask(String id, String? partnerId) {
-    setState(() {
-      final list = partnerId != null ? _partnerTasksMap[partnerId] : _myTasks;
-      if (list != null) {
-        final index = list.indexWhere((t) => t.id == id);
-        if (index != -1) {
-          final task = list[index];
-          final newIsDone = !task.isDone;
-          DateTime? nextReset;
-
-          if (newIsDone) {
-            final now = DateTime.now();
-            if (task.resetType == ResetType.interval && task.resetValue != null) {
-              // Reset after X minutes
-              nextReset = now.add(Duration(minutes: task.resetValue!));
-            } else if (task.resetType == ResetType.daily && task.resetValue != null) {
-              // Reset at specific time (e.g. 0400)
-              final hour = task.resetValue! ~/ 100;
-              final minute = task.resetValue! % 100;
-              var target = DateTime(now.year, now.month, now.day, hour, minute);
-              if (target.isBefore(now)) {
-                target = target.add(const Duration(days: 1));
-              }
-              nextReset = target;
-            }
-          }
-
-          list[index] = task.copyWith(
-            isDone: newIsDone,
-            doneAt: newIsDone ? DateTime.now() : null,
-            scheduledResetAt: nextReset,
-          );
-        }
-      }
-    });
-    _syncWidget();
-  }
-
-  Future<void> _syncWidget() async {
-    try {
-      final myJson = jsonEncode(_myTasks.map((t) => t.toJson()).toList());
-      await HomeWidget.saveWidgetData<String>(myTasksKey, myJson);
+    
+    // Fetch partner tasks
+    for (int i = 0; i < _partnerIds.length; i++) {
+      final pid = _partnerIds[i];
+      final pTasksStream = _supabaseService.getPartnerTasksStream(pid);
+      final pTasks = await pTasksStream.first;
       
-      // Save each partner's tasks and name with a specific key index
-      for (int i = 0; i < 3; i++) {
-        String key = 'partner_tasks_key_$i';
-        String nameKey = 'partner_name_key_$i';
-        
-        if (i < _partnerIds.length) {
-          String pid = _partnerIds[i];
-          List<Task> tasks = _partnerTasksMap[pid] ?? [];
-          String name = _partnerNames[pid] ?? "Partner ${i + 1}";
-          
-          final pJson = jsonEncode(tasks.map((t) => t.toJson()).toList());
-          await HomeWidget.saveWidgetData<String>(key, pJson);
-          await HomeWidget.saveWidgetData<String>(nameKey, name);
-        } else {
-          // Clear unused keys
-          await HomeWidget.saveWidgetData<String>(key, "[]");
-          await HomeWidget.saveWidgetData<String>(nameKey, "");
-        }
-      }
-
-      await HomeWidget.updateWidget(name: widgetName, iOSName: widgetName);
-      debugPrint('--- Synced All Tasks to Widget ---');
-    } catch (e) {
-      debugPrint('Error syncing widget: $e');
+      await HomeWidget.saveWidgetData(
+        'partner_tasks_key_$i',
+        jsonEncode(pTasks.map((t) => t.toJson()).toList()),
+      );
     }
+
+    await HomeWidget.updateWidget(
+      iOSName: iOSWidgetName,
+    );
+    print("--- Synced All Tasks to Widget ---");
   }
 
   // --- UI Helpers ---
@@ -273,9 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final isEditing = taskToEdit != null;
     final controller = TextEditingController(text: taskToEdit?.title ?? '');
     
-    ResetType selectedType = taskToEdit?.resetType ?? ResetType.none;
-    int? selectedValue = taskToEdit?.resetValue;
-    String? selectedTargetPartner = taskToEdit?.targetPartnerId;
+    String? selectedTargetPartner = taskToEdit?.targetPartnerId ?? partnerId;
 
     showDialog(
       context: context,
@@ -302,7 +221,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 20),
                   
-                  // Target Partner Selection (Only for My Tasks)
+                  // Target Partner Selection (Only for My Tasks page or if editing)
                   if (partnerId == null && _partnerIds.isNotEmpty) ...[
                     const Text("Share with Partner:", style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.textSecondary)),
                     const SizedBox(height: 8),
@@ -323,50 +242,19 @@ class _HomeScreenState extends State<HomeScreen> {
                         });
                       },
                     ),
-                    const SizedBox(height: 20),
                   ],
-
-                  const Text("Auto Reset Rule:", style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.textSecondary)),
-                  const SizedBox(height: 8),
-                  DropdownButton<String>(
-                    value: _getResetLabel(selectedType, selectedValue),
-                    isExpanded: true,
-                    items: [
-                      const DropdownMenuItem(value: "None", child: Text("None (Manual Reset)")),
-                      const DropdownMenuItem(value: "1 Hour After Done", child: Text("1 Hour After Done")),
-                      const DropdownMenuItem(value: "3 Hours After Done", child: Text("3 Hours After Done")),
-                      const DropdownMenuItem(value: "6 Hours After Done", child: Text("6 Hours After Done")),
-                      const DropdownMenuItem(value: "12 Hours After Done", child: Text("12 Hours After Done")),
-                      const DropdownMenuItem(value: "24 Hours After Done", child: Text("24 Hours After Done")),
-                    ],
-                    onChanged: (value) {
-                      setDialogState(() {
-                        if (value == "1 Hour After Done") {
-                          selectedType = ResetType.interval;
-                          selectedValue = 60;
-                        } else if (value == "3 Hours After Done") {
-                          selectedType = ResetType.interval;
-                          selectedValue = 180;
-                        } else if (value == "6 Hours After Done") {
-                          selectedType = ResetType.interval;
-                          selectedValue = 360;
-                        } else if (value == "12 Hours After Done") {
-                          selectedType = ResetType.interval;
-                          selectedValue = 720;
-                        } else if (value == "24 Hours After Done") {
-                          selectedType = ResetType.interval;
-                          selectedValue = 1440;
-                        } else {
-                          selectedType = ResetType.none;
-                          selectedValue = null;
-                        }
-                      });
-                    },
-                  ),
                 ],
               ),
             ),
             actions: [
+              if (isEditing)
+                TextButton(
+                  onPressed: () {
+                    _deleteTask(taskToEdit!.id);
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Delete', style: TextStyle(color: Colors.red)),
+                ),
               TextButton(
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
@@ -376,9 +264,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: () {
                   if (controller.text.isNotEmpty) {
                     if (isEditing) {
-                      _editTask(taskToEdit!.id, partnerId, controller.text, selectedType, selectedValue, selectedTargetPartner);
+                      _editTask(taskToEdit!.id, controller.text);
                     } else {
-                      _addTask(controller.text, partnerId, selectedType, selectedValue, selectedTargetPartner);
+                      _addTask(controller.text, selectedTargetPartner);
                     }
                     Navigator.pop(context);
                   }
@@ -433,50 +321,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         final name = _partnerNames[pid] ?? "No Name";
                         return ListTile(
                           title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text("ID: $pid"),
-                          onTap: () {
-                            // Edit Name Dialog
-                            final editNameController = TextEditingController(text: name);
-                            showDialog(
-                              context: context,
-                              builder: (context) => AlertDialog(
-                                title: const Text("Edit Nickname"),
-                                content: TextField(
-                                  controller: editNameController,
-                                  decoration: const InputDecoration(labelText: "Nickname"),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(context),
-                                    child: const Text("Cancel"),
-                                  ),
-                                  ElevatedButton(
-                                    onPressed: () {
-                                      setDialogState(() {
-                                        final newNames = Map<String, String>.from(_partnerNames);
-                                        newNames[pid] = editNameController.text;
-                                        _updatePartners(_partnerIds, newNames);
-                                      });
-                                      Navigator.pop(context);
-                                    },
-                                    child: const Text("Save"),
-                                  )
-                                ],
-                              ),
-                            );
-                          },
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () {
-                              setDialogState(() {
-                                final newIds = List<String>.from(_partnerIds);
-                                final newNames = Map<String, String>.from(_partnerNames);
-                                newIds.removeAt(index);
-                                newNames.remove(pid);
-                                _updatePartners(newIds, newNames);
-                              });
-                            },
-                          ),
+                          subtitle: Text("ID: ${pid.substring(0, 8)}..."),
+                          onTap: () {},
                         );
                       },
                     ),
@@ -494,31 +340,42 @@ class _HomeScreenState extends State<HomeScreen> {
                     TextField(
                       controller: nameController,
                       decoration: const InputDecoration(
-                        labelText: 'Nickname',
-                        hintText: 'e.g. Mom, John',
+                        labelText: 'Nickname (Optional)',
+                        hintText: 'e.g. Mom',
                         border: OutlineInputBorder(),
                       ),
                     ),
                     const SizedBox(height: 8),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(backgroundColor: AppColors.vintageNavy),
-                      onPressed: () {
-                        if (idController.text.isNotEmpty && nameController.text.isNotEmpty) {
+                      onPressed: () async {
+                        if (idController.text.isNotEmpty) {
                           if (_partnerIds.contains(idController.text)) {
-                            // Duplicate check
                             return;
                           }
-                          setDialogState(() {
-                            final newIds = List<String>.from(_partnerIds);
-                            final newNames = Map<String, String>.from(_partnerNames);
+                          
+                          try {
+                            // Add partner via Supabase
+                            await _supabaseService.addPartner(idController.text);
                             
-                            newIds.add(idController.text);
-                            newNames[idController.text] = nameController.text;
+                            // Save nickname locally if provided
+                            if (nameController.text.isNotEmpty) {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString('partner_nickname_${idController.text}', nameController.text);
+                            }
+
+                            // Reload partners
+                            await _loadPartners();
                             
-                            _updatePartners(newIds, newNames);
-                            idController.clear();
-                            nameController.clear();
-                          });
+                            setDialogState(() {
+                              idController.clear();
+                              nameController.clear();
+                            });
+                          } catch (e) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('無効なPartner IDです。')),
+                            );
+                          }
                         }
                       },
                       child: const Text('Add Partner', style: TextStyle(color: Colors.white)),
@@ -540,57 +397,173 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  String _getFormattedDate() {
+    final now = DateTime.now();
+    final months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    return "${months[now.month - 1]} ${now.day}";
+  }
+
+  Widget _buildTaskPage({
+    required String title,
+    required String subtitle,
+    required String? partnerId,
+    required Color accentColor,
+    required IconData icon,
+    bool isPartnerPage = false,
+  }) {
+    final stream = isPartnerPage 
+        ? _supabaseService.getPartnerTasksStream(partnerId!) 
+        : (_myTasksStream ?? const Stream.empty());
+
+    return StreamBuilder<List<Task>>(
+      stream: stream,
+      builder: (context, snapshot) {
+        final tasks = snapshot.data ?? [];
+        
+        // Calculate Progress
+        double progress = 0.0;
+        if (tasks.isNotEmpty) {
+          int doneCount = tasks.where((t) => t.isDone).length;
+          progress = doneCount / tasks.length;
+        }
+
+        return Column(
+          children: [
+            // Progress Header
+            ProgressHeader(
+              title: title,
+              subtitle: subtitle,
+              progress: progress,
+              accentColor: accentColor,
+              icon: icon,
+            ),
+            
+            // Task List
+            Expanded(
+              child: tasks.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.list_alt, size: 60, color: AppColors.textSecondary.withOpacity(0.3)),
+                          const SizedBox(height: 16),
+                          Text(
+                            "No tasks yet.",
+                            style: TextStyle(color: AppColors.textSecondary.withOpacity(0.5)),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.only(bottom: 80), // Space for FAB
+                      itemCount: tasks.length,
+                      itemBuilder: (context, index) {
+                        final task = tasks[index];
+                        return NeumorphicTaskCard(
+                          task: task,
+                          onTap: () => _toggleTask(task.id, task.isDone),
+                          onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
+                          partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
+                          isReadOnly: isPartnerPage,
+                        );
+                      },
+                    ),
+            ),
+          ],
+        );
+      }
+    );
+  }
+
+  DateTime? _lastSnackBarTime;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            // Header with Indicator
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'OMAMORI',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w900,
-                      color: AppColors.textPrimary,
-                      letterSpacing: 1.2,
+      backgroundColor: AppColors.background,
+      body: BackgroundPattern(
+        child: SafeArea(
+          child: Column(
+            children: [
+              // Top Bar (Logo & Indicator)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    GestureDetector(
+                      onTap: () {
+                        final now = DateTime.now();
+                        if (_lastSnackBarTime != null && 
+                            now.difference(_lastSnackBarTime!) < const Duration(seconds: 1)) {
+                          return;
+                        }
+
+                        final userId = _supabaseService.currentUser?.id;
+                        if (userId != null) {
+                          Clipboard.setData(ClipboardData(text: userId));
+                          _lastSnackBarTime = now;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('IDがコピーされました！'),
+                              duration: Duration(seconds: 1),
+                            ),
+                          );
+                        }
+                      },
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'OMAMORI',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.textPrimary,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                          if (_supabaseService.currentUser != null)
+                            Text(
+                              "ID: ${_supabaseService.currentUser!.id.substring(0, 8)}...",
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: AppColors.textSecondary.withOpacity(0.7),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                  // Page Indicator
-                  Row(
-                    children: List.generate(1 + (_partnerIds.isEmpty ? 1 : _partnerIds.length), (index) {
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                        child: _buildDot(index),
-                      );
-                    }),
-                  ),
-                ],
+                    // Page Indicator
+                    Row(
+                      children: List.generate(1 + (_partnerIds.isEmpty ? 1 : _partnerIds.length), (index) {
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                          child: _buildDot(index),
+                        );
+                      }),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            
-            // Page View
-            Expanded(
-              child: PageView(
-                controller: _pageController,
-                onPageChanged: (index) {
-                  setState(() {
-                    _currentPage = index;
-                  });
-                },
-                children: [
-                  // Page 0: My Tasks
+              
+              // Page View
+              Expanded(
+                child: PageView(
+                  controller: _pageController,
+                  onPageChanged: (index) {
+                    setState(() {
+                      _currentPage = index;
+                    });
+                  },
+                  children: [
+                    // Page 0: My Tasks
                   _buildTaskPage(
                     title: "MY TASKS",
-                    tasks: _myTasks,
+                    subtitle: _getFormattedDate(),
                     partnerId: null,
+                    accentColor: AppColors.vintageNavy,
                     icon: Icons.person,
-                    color: AppColors.vintageNavy,
                   ),
                   
                   // Partner Pages
@@ -598,12 +571,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     _buildEmptyPartnerPage()
                   else
                     ..._partnerIds.map((pid) => _buildTaskPage(
-                      title: _partnerNames[pid]?.toUpperCase() ?? "PARTNER",
-                      tasks: _partnerTasksMap[pid] ?? [],
+                      title: _partnerNames[pid] ?? "PARTNER",
+                      subtitle: "PARTNER'S TASKS",
                       partnerId: pid,
-                      icon: Icons.favorite,
-                      color: AppColors.terracotta,
+                      accentColor: AppColors.terracotta,
                       isPartnerPage: true,
+                      icon: Icons.favorite,
                     )).toList(),
                 ],
               ),
@@ -611,8 +584,15 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
+      ),
       floatingActionButton: Container(
-        decoration: AppStyles.neumorphicConvex.copyWith(borderRadius: BorderRadius.circular(30)),
+        height: 64,
+        width: 64,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: AppColors.background,
+          boxShadow: AppStyles.neumorphicConvex.boxShadow,
+        ),
         child: FloatingActionButton(
           onPressed: () {
             String? currentPartnerId;
@@ -625,84 +605,27 @@ class _HomeScreenState extends State<HomeScreen> {
             }
             _showTaskDialog(partnerId: currentPartnerId);
           },
-          backgroundColor: AppColors.background,
+          backgroundColor: Colors.transparent,
           elevation: 0,
-          child: const Icon(Icons.add, color: AppColors.textPrimary, size: 30),
+          child: const Icon(Icons.add, color: AppColors.textPrimary, size: 32),
         ),
       ),
     );
   }
 
   Widget _buildDot(int index) {
+    bool isActive = _currentPage == index;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
-      height: 10,
-      width: _currentPage == index ? 20 : 10,
+      height: 8,
+      width: isActive ? 24 : 8,
       decoration: BoxDecoration(
-        color: _currentPage == index ? AppColors.vintageNavy : Colors.grey.withOpacity(0.3),
-        borderRadius: BorderRadius.circular(5),
+        color: isActive ? AppColors.vintageNavy : AppColors.textSecondary.withOpacity(0.3),
+        borderRadius: BorderRadius.circular(4),
       ),
     );
   }
-
-  Widget _buildTaskPage({
-    required String title,
-    required List<Task> tasks,
-    required String? partnerId,
-    required IconData icon,
-    required Color color,
-    bool isPartnerPage = false,
-  }) {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
-                children: [
-                  Icon(icon, color: color, size: 20),
-                  const SizedBox(width: 8),
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: color.withOpacity(0.7),
-                      letterSpacing: 1.0,
-                    ),
-                  ),
-                ],
-              ),
-              if (isPartnerPage)
-                IconButton(
-                  icon: const Icon(Icons.settings, size: 18, color: AppColors.textSecondary),
-                  onPressed: _showPartnerManagementDialog,
-                ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.only(bottom: 80),
-            itemCount: tasks.length,
-            itemBuilder: (context, index) {
-              final task = tasks[index];
-              return NeumorphicTaskCard(
-                task: task,
-                onTap: () => _toggleTask(task.id, partnerId),
-                onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
-                partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
-                isReadOnly: isPartnerPage,
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
+  
   Widget _buildEmptyPartnerPage() {
     return Center(
       child: Column(

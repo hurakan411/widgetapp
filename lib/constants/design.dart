@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
 class AppColors {
-  // Base Background
-  static const Color background = Color(0xFFE0E5EC);
+  // Base Colors
+  static const Color background = Color(0xFFE8E2E4); // Warm Mauve Grey
 
   // Primary Colors (Done)
   static const Color mustardYellow = Color(0xFFE3B04B);
@@ -25,37 +25,36 @@ class AppStyles {
   // Neumorphism Decoration (Convex / 凸)
   static BoxDecoration neumorphicConvex = BoxDecoration(
     color: AppColors.background,
-    borderRadius: BorderRadius.circular(20),
-    boxShadow: const [
+    borderRadius: BorderRadius.circular(16),
+    boxShadow: [
       BoxShadow(
-        color: AppColors.shadowLight,
-        offset: Offset(-6, -6),
-        blurRadius: 12,
+        color: Colors.white.withOpacity(0.6), // Reduced opacity
+        offset: const Offset(-5, -5), // Increased offset
+        blurRadius: 10,
       ),
       BoxShadow(
-        color: AppColors.shadowDark,
-        offset: Offset(6, 6),
-        blurRadius: 12,
+        color: Colors.black.withOpacity(0.2), // Increased opacity
+        offset: const Offset(5, 5), // Increased offset
+        blurRadius: 10,
       ),
     ],
   );
 
   // Neumorphism Decoration (Concave / 凹) - Pressed state
   static BoxDecoration neumorphicConcave = BoxDecoration(
-    color: AppColors.background, // Or slightly darker if needed
-    borderRadius: BorderRadius.circular(20),
-    boxShadow: const [
+    color: AppColors.background,
+    borderRadius: BorderRadius.circular(16),
+    boxShadow: [
       BoxShadow(
-        color: AppColors.shadowLight,
-        offset: Offset(4, 4), // Inset effect simulation usually needs custom painting or specific package, 
-                              // but standard shadow inversion works for basic feel.
-                              // For true inset, we might need a library, but let's stick to standard for now.
-        blurRadius: 5,
-        spreadRadius: -3,
+        color: Colors.black.withOpacity(0.2), // Increased opacity
+        offset: const Offset(-5, -5), // Increased offset
+        blurRadius: 10,
       ),
-      // Inset shadows are tricky in standard Flutter BoxDecoration.
-      // We will simulate "Pressed" state by removing outer shadows and changing color slightly or using a custom painter later.
-      // For now, let's define a "Pressed" look that is flatter.
+      BoxShadow(
+        color: Colors.white.withOpacity(0.6), // Light shadow bottom-right
+        offset: const Offset(5, 5), // Increased offset
+        blurRadius: 10,
+      ),
     ],
   );
   
