@@ -28,14 +28,14 @@ class AppStyles {
     borderRadius: BorderRadius.circular(16),
     boxShadow: [
       BoxShadow(
-        color: Colors.white.withOpacity(0.6), // Reduced opacity
-        offset: const Offset(-5, -5), // Increased offset
-        blurRadius: 10,
+        color: Colors.white.withOpacity(0.4), // Reduced opacity
+        offset: const Offset(-3, -3), // Reduced offset
+        blurRadius: 6, // Reduced blur
       ),
       BoxShadow(
-        color: Colors.black.withOpacity(0.2), // Increased opacity
-        offset: const Offset(5, 5), // Increased offset
-        blurRadius: 10,
+        color: Colors.black.withOpacity(0.1), // Reduced opacity
+        offset: const Offset(3, 3), // Reduced offset
+        blurRadius: 6, // Reduced blur
       ),
     ],
   );
@@ -46,14 +46,14 @@ class AppStyles {
     borderRadius: BorderRadius.circular(16),
     boxShadow: [
       BoxShadow(
-        color: Colors.black.withOpacity(0.2), // Increased opacity
-        offset: const Offset(-5, -5), // Increased offset
-        blurRadius: 10,
+        color: Colors.black.withOpacity(0.1), // Reduced opacity
+        offset: const Offset(-3, -3), // Reduced offset
+        blurRadius: 6, // Reduced blur
       ),
       BoxShadow(
-        color: Colors.white.withOpacity(0.6), // Light shadow bottom-right
-        offset: const Offset(5, 5), // Increased offset
-        blurRadius: 10,
+        color: Colors.white.withOpacity(0.4), // Reduced opacity
+        offset: const Offset(3, 3), // Reduced offset
+        blurRadius: 6, // Reduced blur
       ),
     ],
   );

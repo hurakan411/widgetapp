@@ -65,7 +65,7 @@ class SupabaseService {
         .map((data) => data.map((json) => _toTask(json)).toList());
   }
 
-  Future<void> addTask(String title, String? targetPartnerId) async {
+  Future<void> addTask(String title, String? targetPartnerId, {bool requiresConfirmation = false, ResetType resetType = ResetType.none, int? resetValue}) async {
     final user = currentUser;
     if (user == null) return;
 
@@ -74,7 +74,9 @@ class SupabaseService {
       'title': title,
       'is_done': false,
       'target_partner_id': targetPartnerId,
-      // 'created_at' is handled by default in DB
+      'requires_confirmation': requiresConfirmation,
+      'reset_type': resetType == ResetType.none ? null : resetType.name,
+      'reset_value': resetValue,
     });
   }
 
@@ -85,7 +87,22 @@ class SupabaseService {
     }).eq('id', taskId);
   }
 
-  // ... (other methods remain similar but ensure snake_case keys if needed)
+  Future<void> updateTask(String taskId, {String? title, bool? requiresConfirmation, ResetType? resetType, int? resetValue}) async {
+    final updates = <String, dynamic>{};
+    if (title != null) updates['title'] = title;
+    if (requiresConfirmation != null) updates['requires_confirmation'] = requiresConfirmation;
+    if (resetType != null) updates['reset_type'] = resetType == ResetType.none ? null : resetType.name;
+    if (resetValue != null) updates['reset_value'] = resetValue;
+    
+    if (updates.isNotEmpty) {
+      await _client.from('tasks').update(updates).eq('id', taskId);
+    }
+  }
+
+  Future<void> confirmTask(String taskId) async {
+    // When confirmed by partner, delete the task (or archive it)
+    await deleteTask(taskId);
+  }
 
   // Helper to convert Supabase JSON (snake_case) to Task
   Task _toTask(Map<String, dynamic> json) {
@@ -95,15 +112,22 @@ class SupabaseService {
       isDone: json['is_done'] ?? false,
       doneAt: json['done_at'] != null ? DateTime.parse(json['done_at']) : null,
       createdAt: DateTime.parse(json['created_at']),
-      // Reset config might not be in DB yet, handle gracefully
       targetPartnerId: json['target_partner_id'],
+      requiresConfirmation: json['requires_confirmation'] ?? false,
+      isConfirmed: json['is_confirmed'] ?? false,
+      resetType: _parseResetType(json['reset_type']),
+      resetValue: json['reset_value'],
     );
   }
 
+  ResetType _parseResetType(String? type) {
+    if (type == 'daily') return ResetType.daily;
+    if (type == 'interval') return ResetType.interval;
+    return ResetType.none;
+  }
+
   Future<void> updateTaskTitle(String taskId, String newTitle) async {
-    await _client.from('tasks').update({
-      'title': newTitle,
-    }).eq('id', taskId);
+    await updateTask(taskId, title: newTitle);
   }
 
   Future<void> deleteTask(String taskId) async {

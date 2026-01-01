@@ -72,6 +72,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _supabaseService = SupabaseService();
   
   Stream<List<Task>>? _myTasksStream;
+  final Set<String> _deletingTaskIds = {}; // Track tasks currently animating out
 
   @override
   void initState() {
@@ -128,27 +129,88 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // --- Task Operations (Supabase) ---
 
-  void _addTask(String title, String? targetPartnerId) async {
-    await _supabaseService.addTask(title, targetPartnerId);
+  Future<void> _addTask(String title, String? targetPartnerId, bool requiresConfirmation, ResetType resetType, int? resetValue) async {
+    await _supabaseService.addTask(title, targetPartnerId, requiresConfirmation: requiresConfirmation, resetType: resetType, resetValue: resetValue);
     _updateWidget();
   }
 
-  void _toggleTask(String taskId, bool currentStatus) async {
-    // Optimistic update not strictly needed with StreamBuilder, but good for UX.
-    // However, StreamBuilder will handle the UI update automatically.
-    await _supabaseService.toggleTask(taskId, !currentStatus);
-    _updateWidget();
-  }
-
-  void _editTask(String taskId, String newTitle) async {
-    await _supabaseService.updateTaskTitle(taskId, newTitle);
-    _updateWidget();
-  }
-
-  void _deleteTask(String taskId) async {
+  Future<void> _deleteTask(String taskId) async {
     await _supabaseService.deleteTask(taskId);
+    setState(() {
+      _myTasksStream = _supabaseService.getTasksStream();
+    });
     _updateWidget();
   }
+
+  Future<void> _toggleTask(Task task, bool isPartnerPage) async {
+    if (!isPartnerPage) {
+      // My Task
+      if (!task.isDone) {
+        // Mark as Done
+        if (!task.requiresConfirmation && task.resetType == ResetType.none) {
+          // Auto-delete: Animate first
+          setState(() {
+            _deletingTaskIds.add(task.id);
+          });
+          
+          // Wait for animation
+          await Future.delayed(const Duration(milliseconds: 1500));
+          
+          await _deleteTask(task.id);
+          
+          if (mounted) {
+            setState(() {
+              _deletingTaskIds.remove(task.id);
+            });
+          }
+          return; 
+        } else {
+          // Just mark done
+          await _supabaseService.toggleTask(task.id, true);
+        }
+      } else {
+        // Mark as Undone (Undo)
+        await _supabaseService.toggleTask(task.id, false);
+      }
+    } else {
+      // Partner's Task
+      if (task.isDone) {
+        // Confirm logic
+        if (task.requiresConfirmation) {
+          // Confirm and delete: Animate first
+          setState(() {
+            _deletingTaskIds.add(task.id);
+          });
+          
+          await Future.delayed(const Duration(milliseconds: 1500));
+          
+          await _supabaseService.confirmTask(task.id);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Task Confirmed!")));
+          
+          if (mounted) {
+            setState(() {
+              _deletingTaskIds.remove(task.id);
+              _myTasksStream = _supabaseService.getTasksStream();
+            });
+          }
+          _updateWidget();
+          return;
+        }
+      }
+    }
+    
+    // Refresh stream for non-delete updates
+    setState(() {
+      _myTasksStream = _supabaseService.getTasksStream();
+    });
+    _updateWidget();
+  }
+
+  Future<void> _editTask(String taskId, String newTitle, bool requiresConfirmation, ResetType resetType, int? resetValue) async {
+    await _supabaseService.updateTask(taskId, title: newTitle, requiresConfirmation: requiresConfirmation, resetType: resetType, resetValue: resetValue);
+    _updateWidget();
+  }
+
 
   void _updateWidget() {
     // Sync logic for widget needs to be adapted for Supabase data.
@@ -190,90 +252,264 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // --- UI Helpers ---
 
-  void _showTaskDialog({required String? partnerId, Task? taskToEdit}) {
+  void _showTaskDialog({String? partnerId, Task? taskToEdit}) {
     final isEditing = taskToEdit != null;
     final controller = TextEditingController(text: taskToEdit?.title ?? '');
+    String? selectedTargetPartner = isEditing ? taskToEdit.targetPartnerId : partnerId;
+    bool requiresConfirmation = taskToEdit?.requiresConfirmation ?? false;
+    ResetType resetType = taskToEdit?.resetType ?? ResetType.none;
     
-    String? selectedTargetPartner = taskToEdit?.targetPartnerId ?? partnerId;
+    int? resetValue = taskToEdit?.resetValue;
+    TimeOfDay resetTime = resetValue != null 
+        ? TimeOfDay(hour: resetValue ~/ 100, minute: resetValue % 100)
+        : const TimeOfDay(hour: 4, minute: 0);
 
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
-          return AlertDialog(
-            backgroundColor: AppColors.background,
-            title: Text(
-              isEditing ? 'Edit Task' : (partnerId != null ? 'New Task for ${_partnerNames[partnerId] ?? "Partner"}' : 'New Task for Me'),
-              style: const TextStyle(color: AppColors.textPrimary),
-            ),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  TextField(
-                    controller: controller,
-                    decoration: const InputDecoration(
-                      labelText: 'Task Name',
-                      hintText: 'e.g. Water Plants',
-                      border: OutlineInputBorder(),
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(20),
+            child: SingleChildScrollView(
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: AppStyles.neumorphicConvex.copyWith(
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Header
+                    Text(
+                      isEditing ? 'タスク編集' : '新規タスク',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        color: AppColors.textPrimary,
+                        letterSpacing: 1.0,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  
-                  // Target Partner Selection (Only for My Tasks page or if editing)
-                  if (partnerId == null && _partnerIds.isNotEmpty) ...[
-                    const Text("Share with Partner:", style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.textSecondary)),
-                    const SizedBox(height: 8),
-                    DropdownButton<String?>(
-                      value: selectedTargetPartner,
-                      isExpanded: true,
-                      hint: const Text("Select Partner (Optional)"),
-                      items: [
-                        const DropdownMenuItem(value: null, child: Text("None (Private / All)")),
-                        ..._partnerIds.map((pid) => DropdownMenuItem(
-                          value: pid,
-                          child: Text(_partnerNames[pid] ?? pid),
-                        )),
+                    const SizedBox(height: 24),
+
+                    // Task Name Input (Concave)
+                    Container(
+                      decoration: AppStyles.neumorphicConcave.copyWith(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: TextField(
+                        controller: controller,
+                        autofocus: true,
+                        decoration: const InputDecoration(
+                          hintText: 'タスク名を入力',
+                          hintStyle: TextStyle(color: AppColors.textSecondary),
+                          border: InputBorder.none,
+                        ),
+                        style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Reset Type (Convex)
+                    Container(
+                      decoration: AppStyles.neumorphicConvex.copyWith(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButtonFormField<ResetType>(
+                          value: resetType,
+                          decoration: const InputDecoration(
+                            labelText: "ルーティン設定",
+                            labelStyle: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                            border: InputBorder.none,
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: ResetType.none, child: Text("なし（一回限り）")),
+                            DropdownMenuItem(value: ResetType.daily, child: Text("毎日繰り返す")),
+                          ],
+                          onChanged: (val) {
+                            setDialogState(() {
+                              resetType = val!;
+                              if (resetType != ResetType.none) {
+                                requiresConfirmation = false;
+                                // Set default reset value if not set
+                                if (resetValue == null) {
+                                  resetValue = 400; // 04:00
+                                  resetTime = const TimeOfDay(hour: 4, minute: 0);
+                                }
+                              } else {
+                                resetValue = null;
+                              }
+                            });
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Reset Time Picker (Only if Daily)
+                    if (resetType == ResetType.daily) ...[
+                      GestureDetector(
+                        onTap: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: resetTime,
+                          );
+                          if (picked != null) {
+                            setDialogState(() {
+                              resetTime = picked;
+                              resetValue = picked.hour * 100 + picked.minute;
+                            });
+                          }
+                        },
+                        child: Container(
+                          decoration: AppStyles.neumorphicConvex.copyWith(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text("リセット時間", style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold)),
+                              Text(
+                                "${resetTime.hour.toString().padLeft(2, '0')}:${resetTime.minute.toString().padLeft(2, '0')}",
+                                style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.textPrimary, fontSize: 16),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+
+                    // Confirmation Switch (Convex) - Only if Routine is None
+                    if (resetType == ResetType.none) ...[
+                      Container(
+                        decoration: AppStyles.neumorphicConvex.copyWith(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        child: SwitchListTile(
+                          title: const Text("パートナーの確認を待つ", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.textPrimary)),
+                          subtitle: const Text("パートナーが確認（タップ）すると消えます", style: TextStyle(fontSize: 10, color: AppColors.textSecondary)),
+                          value: requiresConfirmation,
+                          activeColor: AppColors.vintageNavy,
+                          onChanged: (val) => setDialogState(() => requiresConfirmation = val),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    
+                    // Partner Selection
+                    if ((partnerId == null || isEditing) && _partnerIds.isNotEmpty) ...[
+                      Container(
+                        decoration: AppStyles.neumorphicConvex.copyWith(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButtonFormField<String?>(
+                            value: selectedTargetPartner,
+                            decoration: const InputDecoration(
+                              labelText: "パートナーと共有",
+                              labelStyle: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                              border: InputBorder.none,
+                            ),
+                            items: [
+                              const DropdownMenuItem(value: null, child: Text("指定なし（全員に公開 / 自分のみ）")),
+                              ..._partnerIds.map((pid) => DropdownMenuItem(
+                                value: pid,
+                                child: Text(_partnerNames[pid] ?? pid),
+                              )),
+                            ],
+                            onChanged: (value) {
+                              setDialogState(() {
+                                selectedTargetPartner = value;
+                              });
+                            },
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                    ],
+
+                    // Actions
+                    Row(
+                      children: [
+                        if (isEditing) ...[
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () {
+                                _deleteTask(taskToEdit!.id);
+                                Navigator.pop(context);
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                decoration: AppStyles.neumorphicConvex.copyWith(
+                                  borderRadius: BorderRadius.circular(12),
+                                  color: AppColors.background,
+                                ),
+                                child: const Center(
+                                  child: Text('削除', style: TextStyle(color: AppColors.terracotta, fontWeight: FontWeight.bold)),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                        ],
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () => Navigator.pop(context),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              decoration: AppStyles.neumorphicConvex.copyWith(
+                                borderRadius: BorderRadius.circular(12),
+                                color: AppColors.background,
+                              ),
+                              child: const Center(
+                                child: Text('キャンセル', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold)),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () {
+                              if (controller.text.isNotEmpty) {
+                                if (isEditing) {
+                                  _editTask(taskToEdit!.id, controller.text, requiresConfirmation, resetType, resetValue);
+                                } else {
+                                  _addTask(controller.text, selectedTargetPartner, requiresConfirmation, resetType, resetValue);
+                                }
+                                Navigator.pop(context);
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              decoration: AppStyles.neumorphicConvex.copyWith(
+                                borderRadius: BorderRadius.circular(12),
+                                color: AppColors.background,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  isEditing ? '保存' : '追加',
+                                  style: const TextStyle(color: AppColors.vintageNavy, fontWeight: FontWeight.w900),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
-                      onChanged: (value) {
-                        setDialogState(() {
-                          selectedTargetPartner = value;
-                        });
-                      },
                     ),
                   ],
-                ],
+                ),
               ),
             ),
-            actions: [
-              if (isEditing)
-                TextButton(
-                  onPressed: () {
-                    _deleteTask(taskToEdit!.id);
-                    Navigator.pop(context);
-                  },
-                  child: const Text('Delete', style: TextStyle(color: Colors.red)),
-                ),
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
-              ),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: AppColors.vintageNavy),
-                onPressed: () {
-                  if (controller.text.isNotEmpty) {
-                    if (isEditing) {
-                      _editTask(taskToEdit!.id, controller.text);
-                    } else {
-                      _addTask(controller.text, selectedTargetPartner);
-                    }
-                    Navigator.pop(context);
-                  }
-                },
-                child: Text(isEditing ? 'Save' : 'Add', style: const TextStyle(color: Colors.white)),
-              ),
-            ],
           );
         }
       ),
@@ -459,12 +695,18 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemCount: tasks.length,
                       itemBuilder: (context, index) {
                         final task = tasks[index];
-                        return NeumorphicTaskCard(
-                          task: task,
-                          onTap: () => _toggleTask(task.id, task.isDone),
-                          onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
-                          partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
-                          isReadOnly: isPartnerPage,
+                        final isDeleting = _deletingTaskIds.contains(task.id);
+                        return AnimatedCrossFade(
+                          duration: const Duration(milliseconds: 1500),
+                          firstChild: NeumorphicTaskCard(
+                            task: task,
+                            onTap: () => _toggleTask(task, isPartnerPage),
+                            onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
+                            partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
+                            isReadOnly: isPartnerPage,
+                          ),
+                          secondChild: const SizedBox(width: double.infinity, height: 0),
+                          crossFadeState: isDeleting ? CrossFadeState.showSecond : CrossFadeState.showFirst,
                         );
                       },
                     ),
