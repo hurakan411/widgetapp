@@ -144,62 +144,32 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _toggleTask(Task task, bool isPartnerPage) async {
     if (!isPartnerPage) {
-      // My Task
-      if (!task.isDone) {
-        // Mark as Done
-        if (!task.requiresConfirmation && task.resetType == ResetType.none) {
-          // Auto-delete: Animate first
-          setState(() {
-            _deletingTaskIds.add(task.id);
-          });
-          
-          // Wait for animation
-          await Future.delayed(const Duration(milliseconds: 1500));
-          
-          await _deleteTask(task.id);
-          
-          if (mounted) {
-            setState(() {
-              _deletingTaskIds.remove(task.id);
-            });
-          }
-          return; 
-        } else {
-          // Just mark done
-          await _supabaseService.toggleTask(task.id, true);
-        }
-      } else {
-        // Mark as Undone (Undo)
-        await _supabaseService.toggleTask(task.id, false);
-      }
+      // My Task: Toggle Done/Undone
+      await _supabaseService.toggleTask(task.id, !task.isDone);
     } else {
       // Partner's Task
       if (task.isDone) {
-        // Confirm logic
-        if (task.requiresConfirmation) {
-          // Confirm and delete: Animate first
+        // Confirm logic: If partner's task is done, tapping it confirms it.
+        setState(() {
+          _deletingTaskIds.add(task.id);
+        });
+        
+        await Future.delayed(const Duration(milliseconds: 1500));
+        
+        await _supabaseService.confirmTask(task.id);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Task Confirmed!")));
+        
+        if (mounted) {
           setState(() {
-            _deletingTaskIds.add(task.id);
+            _deletingTaskIds.remove(task.id);
+            _myTasksStream = _supabaseService.getTasksStream();
           });
-          
-          await Future.delayed(const Duration(milliseconds: 1500));
-          
-          await _supabaseService.confirmTask(task.id);
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Task Confirmed!")));
-          
-          if (mounted) {
-            setState(() {
-              _deletingTaskIds.remove(task.id);
-              _myTasksStream = _supabaseService.getTasksStream();
-            });
-          }
-          _updateWidget();
-          return;
         }
       }
+      // If not done, do nothing (Read-only)
     }
     
-    // Refresh stream for non-delete updates
+    // Refresh stream
     setState(() {
       _myTasksStream = _supabaseService.getTasksStream();
     });
@@ -223,13 +193,34 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _syncToWidget() async {
+    // Helper to calculate scheduledResetAt
+    Task updateTaskForWidget(Task task) {
+      if (task.resetType == ResetType.daily && task.resetValue != null) {
+        final now = DateTime.now();
+        final hour = task.resetValue! ~/ 100;
+        final minute = task.resetValue! % 100;
+        
+        DateTime scheduled = DateTime(now.year, now.month, now.day, hour, minute);
+        
+        if (now.isAfter(scheduled)) {
+          // Already passed today's reset time, so next is tomorrow
+          scheduled = scheduled.add(const Duration(days: 1));
+        }
+        
+        return task.copyWith(scheduledResetAt: scheduled);
+      }
+      return task;
+    }
+
     // Fetch my tasks
     final myTasksStream = _supabaseService.getTasksStream();
     final myTasks = await myTasksStream.first; // Get current snapshot
     
+    final myTasksForWidget = myTasks.map((t) => updateTaskForWidget(t)).toList();
+    
     await HomeWidget.saveWidgetData(
       'my_tasks_key',
-      jsonEncode(myTasks.map((t) => t.toJson()).toList()),
+      jsonEncode(myTasksForWidget.map((t) => t.toJson()).toList()),
     );
     
     // Fetch partner tasks
@@ -238,9 +229,11 @@ class _HomeScreenState extends State<HomeScreen> {
       final pTasksStream = _supabaseService.getPartnerTasksStream(pid);
       final pTasks = await pTasksStream.first;
       
+      final pTasksForWidget = pTasks.map((t) => updateTaskForWidget(t)).toList();
+      
       await HomeWidget.saveWidgetData(
         'partner_tasks_key_$i',
-        jsonEncode(pTasks.map((t) => t.toJson()).toList()),
+        jsonEncode(pTasksForWidget.map((t) => t.toJson()).toList()),
       );
     }
 
@@ -381,24 +374,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ],
                           ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                    ],
-
-                    // Confirmation Switch (Convex) - Only if Routine is None
-                    if (resetType == ResetType.none) ...[
-                      Container(
-                        decoration: AppStyles.neumorphicConvex.copyWith(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        child: SwitchListTile(
-                          title: const Text("パートナーの確認を待つ", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.textPrimary)),
-                          subtitle: const Text("パートナーが確認（タップ）すると消えます", style: TextStyle(fontSize: 10, color: AppColors.textSecondary)),
-                          value: requiresConfirmation,
-                          activeColor: AppColors.vintageNavy,
-                          onChanged: (val) => setDialogState(() => requiresConfirmation = val),
                         ),
                       ),
                       const SizedBox(height: 16),

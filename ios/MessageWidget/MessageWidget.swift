@@ -8,12 +8,15 @@ struct Task: Codable, Identifiable {
     let id: String
     let title: String
     var isDone: Bool
-    let doneAt: String?
+    var doneAt: String?
     let createdAt: String
     // Reset Config
     let resetType: Int?
     let resetValue: Int?
     let scheduledResetAt: String?
+    // Confirmation
+    let requiresConfirmation: Bool?
+    var isConfirmed: Bool?
     
     // Helper to check if task is effectively done
     var isEffectivelyDone: Bool {
@@ -38,6 +41,11 @@ struct Task: Codable, Identifiable {
                 }
             }
         }
+        return true
+    }
+    
+    // Helper to check if task should be visible
+    var isVisible: Bool {
         return true
     }
 }
@@ -74,14 +82,98 @@ struct ToggleTaskIntent: AppIntent {
                var tasks = try? JSONDecoder().decode([Task].self, from: data) {
                 
                 if let index = tasks.firstIndex(where: { $0.id == taskId }) {
-                    tasks[index].isDone.toggle()
+                    let isMyTask = key == "my_tasks_key"
                     
-                    if let newData = try? JSONEncoder().encode(tasks),
-                       let newJsonString = String(data: newData, encoding: .utf8) {
-                        userDefaults?.set(newJsonString, forKey: key)
-                        logger.info("--- [Swift] Task toggled in \(key) ---")
-                        return .result()
+                    if isMyTask {
+                        // My Task: Toggle
+                        tasks[index].isDone.toggle()
+                        let newState = tasks[index].isDone
+                        
+                        let formatter = ISO8601DateFormatter()
+                        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                        let doneAtStr = newState ? formatter.string(from: Date()) : nil
+                        
+                        // Update Local Task
+                        tasks[index].doneAt = doneAtStr
+                        
+                        // Save Local
+                        if let newData = try? JSONEncoder().encode(tasks),
+                           let newJsonString = String(data: newData, encoding: .utf8) {
+                            userDefaults?.set(newJsonString, forKey: key)
+                        }
+                        
+                        // Sync to Supabase (PATCH)
+                        if let urlStr = userDefaults?.string(forKey: "supabase_url"),
+                           let anonKey = userDefaults?.string(forKey: "supabase_anon_key"),
+                           let token = userDefaults?.string(forKey: "supabase_access_token"),
+                           let url = URL(string: "\(urlStr)/rest/v1/tasks?id=eq.\(taskId)") {
+                            
+                            var request = URLRequest(url: url)
+                            request.httpMethod = "PATCH"
+                            request.addValue(anonKey, forHTTPHeaderField: "apikey")
+                            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+                            request.addValue("return=minimal", forHTTPHeaderField: "Prefer")
+                            
+                            let body: [String: Any?] = [
+                                "is_done": newState,
+                                "done_at": doneAtStr
+                            ]
+                            
+                            do {
+                                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                                let (_, response) = try await URLSession.shared.data(for: request)
+                                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 300 {
+                                    logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode) ---")
+                                }
+                            } catch {
+                                logger.error("--- [Swift] Network Error: \(error.localizedDescription) ---")
+                            }
+                        }
+                    } else {
+                        // Partner Task: Confirm if Done
+                        if tasks[index].isDone {
+                            // Confirm -> Mark as Confirmed
+                            tasks[index].isConfirmed = true
+                            
+                            // Save Local
+                            if let newData = try? JSONEncoder().encode(tasks),
+                               let newJsonString = String(data: newData, encoding: .utf8) {
+                                userDefaults?.set(newJsonString, forKey: key)
+                            }
+                            
+                            // Sync to Supabase (PATCH)
+                            if let urlStr = userDefaults?.string(forKey: "supabase_url"),
+                               let anonKey = userDefaults?.string(forKey: "supabase_anon_key"),
+                               let token = userDefaults?.string(forKey: "supabase_access_token"),
+                               let url = URL(string: "\(urlStr)/rest/v1/tasks?id=eq.\(taskId)") {
+                                
+                                var request = URLRequest(url: url)
+                                request.httpMethod = "PATCH"
+                                request.addValue(anonKey, forHTTPHeaderField: "apikey")
+                                request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                                request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+                                request.addValue("return=minimal", forHTTPHeaderField: "Prefer")
+                                
+                                let body: [String: Any?] = [
+                                    "is_confirmed": true
+                                ]
+                                
+                                do {
+                                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                                    let (_, response) = try await URLSession.shared.data(for: request)
+                                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 300 {
+                                        logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode) ---")
+                                    }
+                                } catch {
+                                    logger.error("--- [Swift] Network Error: \(error.localizedDescription) ---")
+                                }
+                            }
+                        }
+                        // If not done, do nothing
                     }
+                    
+                    return .result()
                 }
             }
         }
@@ -126,7 +218,7 @@ struct Provider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: SelectTaskModeIntent, in context: Context) async -> SimpleEntry {
         SimpleEntry(date: Date(), tasks: [
-            Task(id: "1", title: "Sample Task", isDone: false, doneAt: nil, createdAt: "", resetType: nil, resetValue: nil, scheduledResetAt: nil)
+            Task(id: "1", title: "Sample Task", isDone: false, doneAt: nil, createdAt: "", resetType: nil, resetValue: nil, scheduledResetAt: nil, requiresConfirmation: nil)
         ], mode: configuration.mode, partnerName: nil)
     }
     
@@ -198,11 +290,17 @@ struct TaskCardView: View {
     
     var body: some View {
         let isDone = task.isEffectivelyDone
+        let isConfirmed = task.isConfirmed ?? false
         
         GeometryReader { geo in
             ZStack {
                 // Background
-                if isDone {
+                if isConfirmed {
+                    // Confirmed State (Gold/Yellow)
+                    Color(red: 0.89, green: 0.69, blue: 0.29).opacity(0.2)
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(Color(red: 0.89, green: 0.69, blue: 0.29), lineWidth: 2)
+                } else if isDone {
                     // Done State (Concave / Pressed)
                     doneColor
                     // Inner Shadow Simulation (Top-Left Dark, Bottom-Right Light for Inset)
@@ -229,51 +327,75 @@ struct TaskCardView: View {
                 
                 // Content
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .top) {
-                        Text(task.title)
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundColor(isDone ? .white : textColor)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .shadow(color: isDone ? .black.opacity(0.1) : .clear, radius: 0, x: 0, y: 1)
-                        
-                        Spacer(minLength: 0)
-                        
-                        // Status Icon
-                        ZStack {
-                            Circle()
-                                .fill(isDone ? .white.opacity(0.3) : baseColor)
-                                .frame(width: 18, height: 18)
-                                .shadow(color: isDone ? .clear : .white, radius: 1, x: -1, y: -1)
-                                .shadow(color: isDone ? .clear : .black.opacity(0.1), radius: 1, x: 1, y: 1)
-                            
-                            if isDone {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 10, weight: .black))
-                                    .foregroundColor(.white)
-                            }
-                        }
-                    }
+                    // Title
+                    Text(task.title)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundColor(isDone ? .white : textColor)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .shadow(color: isDone ? .black.opacity(0.1) : .clear, radius: 0, x: 0, y: 1)
                     
                     Spacer()
                     
-                    if isDone {
-                        Text("DONE")
-                            .font(.system(size: 10, weight: .heavy, design: .rounded))
-                            .foregroundColor(.white.opacity(0.9))
-                            .tracking(1.0)
-                    } else {
-                        Text("TAP TO DONE")
-                            .font(.system(size: 8, weight: .bold, design: .rounded))
-                            .foregroundColor(textColor.opacity(0.4))
+                    // Status Text (Big)
+                    Group {
+                        if isConfirmed {
+                            Text("CONFIRMED")
+                                .font(.system(size: 20, weight: .black, design: .rounded)) // Slightly smaller to fit
+                                .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                                .tracking(1.0)
+                                .minimumScaleFactor(0.5)
+                                .lineLimit(1)
+                        } else if isDone {
+                            if let doneAtStr = task.doneAt, let timeStr = formatDoneTime(doneAtStr) {
+                                HStack(alignment: .lastTextBaseline, spacing: 4) {
+                                    Text("DONE")
+                                        .font(.system(size: 24, weight: .black, design: .rounded))
+                                        .foregroundColor(.white.opacity(0.9))
+                                        .tracking(1.0)
+                                        .minimumScaleFactor(0.5)
+                                    Text(timeStr)
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundColor(.white.opacity(0.7))
+                                        .contentTransition(.numericText())
+                                }
+                            } else {
+                                 Text("DONE")
+                                    .font(.system(size: 24, weight: .black, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.9))
+                                    .tracking(1.0)
+                                    .minimumScaleFactor(0.5)
+                            }
+                        } else {
+                            Text("UNDONE")
+                                .font(.system(size: 24, weight: .black, design: .rounded))
+                                .foregroundColor(textColor.opacity(0.3))
+                                .tracking(1.0)
+                                .minimumScaleFactor(0.5)
+                        }
                     }
+                    .id(isConfirmed ? "confirmed" : (isDone ? "done" : "undone"))
+                    .transition(.push(from: .bottom))
+                    .animation(.snappy, value: isDone)
                 }
-                .padding(10)
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: isDone ? .clear : .black.opacity(0.15), radius: 3, x: 3, y: 3)
         .shadow(color: isDone ? .clear : .white.opacity(0.9), radius: 3, x: -2, y: -2)
+    }
+    
+    func formatDoneTime(_ dateStr: String) -> String? {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: dateStr) {
+            let timeFormatter = DateFormatter()
+            timeFormatter.dateFormat = "HH:mm"
+            return timeFormatter.string(from: date)
+        }
+        return nil
     }
 }
 
@@ -312,7 +434,7 @@ struct MessageWidgetEntryView : View {
                 TaskGridView(tasks: entry.tasks, family: family, mode: entry.mode)
             }
         }
-        .padding(12)
+        .padding(8)
         .containerBackground(for: .widget) {
             Color(red: 0.88, green: 0.90, blue: 0.93)
         }
@@ -343,13 +465,15 @@ struct TaskGridView: View {
     
     var body: some View {
         GeometryReader { geo in
-            let spacing: CGFloat = 12
+            let spacing: CGFloat = 8
             let config = layoutConfig
             let columns = config.columns
             let rows = config.rows
             
             let maxTasks = columns * rows
-            let displayTasks = Array(tasks.prefix(maxTasks))
+            // Filter tasks based on visibility
+            let visibleTasks = tasks.filter { $0.isVisible }
+            let displayTasks = Array(visibleTasks.prefix(maxTasks))
             
             let width = (geo.size.width - (CGFloat(columns - 1) * spacing)) / CGFloat(columns)
             let height = (geo.size.height - (CGFloat(rows - 1) * spacing)) / CGFloat(rows)
@@ -383,20 +507,13 @@ struct TaskGridView: View {
     
     @ViewBuilder
     func taskButton(for task: Task, width: CGFloat, height: CGFloat) -> some View {
-        // Only allow interaction for My Tasks
-        if mode == .me {
-            if #available(iOS 17.0, *) {
-                Button(intent: ToggleTaskIntent(taskId: task.id)) {
-                    TaskCardView(task: task)
-                }
-                .buttonStyle(.plain)
-                .frame(width: width, height: height)
-            } else {
+        if #available(iOS 17.0, *) {
+            Button(intent: ToggleTaskIntent(taskId: task.id)) {
                 TaskCardView(task: task)
-                    .frame(width: width, height: height)
             }
+            .buttonStyle(.plain)
+            .frame(width: width, height: height)
         } else {
-            // Read-only for partners
             TaskCardView(task: task)
                 .frame(width: width, height: height)
         }

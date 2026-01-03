@@ -100,8 +100,10 @@ class SupabaseService {
   }
 
   Future<void> confirmTask(String taskId) async {
-    // When confirmed by partner, delete the task (or archive it)
-    await deleteTask(taskId);
+    // When confirmed by partner, mark as confirmed
+    await _client.from('tasks').update({
+      'is_confirmed': true,
+    }).eq('id', taskId);
   }
 
   // Helper to convert Supabase JSON (snake_case) to Task

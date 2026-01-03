@@ -27,7 +27,12 @@ class NeumorphicTaskCard extends StatelessWidget {
         curve: Curves.easeInOut,
         margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         padding: const EdgeInsets.all(20),
-        decoration: task.isDone ? AppStyles.neumorphicConcave : AppStyles.neumorphicConvex,
+        decoration: task.isConfirmed
+            ? AppStyles.neumorphicConcave.copyWith(
+                color: AppColors.mustardYellow.withOpacity(0.1),
+                border: Border.all(color: AppColors.mustardYellow.withOpacity(0.5), width: 2),
+              )
+            : (task.isDone ? AppStyles.neumorphicConcave : AppStyles.neumorphicConvex),
         child: Row(
           children: [
             // Status Icon
@@ -36,7 +41,7 @@ class NeumorphicTaskCard extends StatelessWidget {
               height: 24,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: AppColors.background,
+                color: task.isConfirmed ? AppColors.mustardYellow : AppColors.background,
                 boxShadow: task.isDone
                     ? [] // No shadow when done (pressed)
                     : [
@@ -56,9 +61,11 @@ class NeumorphicTaskCard extends StatelessWidget {
                   width: 1,
                 ),
               ),
-              child: task.isDone
-                  ? const Icon(Icons.check, size: 16, color: AppColors.vintageNavy)
-                  : null,
+              child: task.isConfirmed
+                  ? const Icon(Icons.done_all, size: 16, color: Colors.white)
+                  : (task.isDone
+                      ? const Icon(Icons.check, size: 16, color: AppColors.vintageNavy)
+                      : null),
             ),
             const SizedBox(width: 16),
             
@@ -74,6 +81,7 @@ class NeumorphicTaskCard extends StatelessWidget {
                       fontWeight: FontWeight.bold,
                       // Revert to primary text color, slightly dimmed if done
                       color: task.isDone ? AppColors.textPrimary.withOpacity(0.5) : AppColors.textPrimary,
+                      decoration: task.isConfirmed ? TextDecoration.lineThrough : null,
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -95,7 +103,17 @@ class NeumorphicTaskCard extends StatelessWidget {
                         ],
                       ),
                     ),
-                  if (task.isDone && task.doneAt != null)
+                  if (task.isConfirmed)
+                     Text(
+                      "CONFIRMED",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.mustardYellow,
+                        letterSpacing: 1.0,
+                      ),
+                    )
+                  else if (task.isDone && task.doneAt != null)
                     Text(
                       "DONE ${task.doneAt!.hour.toString().padLeft(2, '0')}:${task.doneAt!.minute.toString().padLeft(2, '0')}",
                       style: TextStyle(
