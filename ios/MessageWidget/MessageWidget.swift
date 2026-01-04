@@ -15,7 +15,6 @@ struct Task: Codable, Identifiable {
     let resetValue: Int?
     let scheduledResetAt: String?
     // Confirmation
-    let requiresConfirmation: Bool?
     var isConfirmed: Bool?
     
     // Helper to check if task is effectively done
@@ -60,10 +59,14 @@ struct ToggleTaskIntent: AppIntent {
     @Parameter(title: "Task ID")
     var taskId: String
     
+    @Parameter(title: "Is My Task")
+    var isMyTask: Bool
+    
     init() {}
     
-    init(taskId: String) {
+    init(taskId: String, isMyTask: Bool) {
         self.taskId = taskId
+        self.isMyTask = isMyTask
     }
     
     func perform() async throws -> some IntentResult {
@@ -84,66 +87,56 @@ struct ToggleTaskIntent: AppIntent {
                 if let index = tasks.firstIndex(where: { $0.id == taskId }) {
                     let isMyTask = key == "my_tasks_key"
                     
-                    if isMyTask {
-                        // My Task: Toggle
-                        tasks[index].isDone.toggle()
-                        let newState = tasks[index].isDone
-                        
-                        let formatter = ISO8601DateFormatter()
-                        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                        let doneAtStr = newState ? formatter.string(from: Date()) : nil
-                        
-                        // Update Local Task
-                        tasks[index].doneAt = doneAtStr
-                        
-                        // Save Local
-                        if let newData = try? JSONEncoder().encode(tasks),
-                           let newJsonString = String(data: newData, encoding: .utf8) {
-                            userDefaults?.set(newJsonString, forKey: key)
-                        }
-                        
-                        // Sync to Supabase (PATCH)
-                        if let urlStr = userDefaults?.string(forKey: "supabase_url"),
-                           let anonKey = userDefaults?.string(forKey: "supabase_anon_key"),
-                           let token = userDefaults?.string(forKey: "supabase_access_token"),
-                           let url = URL(string: "\(urlStr)/rest/v1/tasks?id=eq.\(taskId)") {
+                    // The original code had an outer `if let index = tasks.firstIndex(...)`
+                    // The provided change re-introduces a loop and an `if tasks[index].id == taskId` check.
+                    // To faithfully apply the change, we'll replace the inner logic block.
+                    // The `for index in 0..<tasks.count` and `if tasks[index].id == taskId`
+                    // are redundant given the outer `firstIndex` but are part of the requested change.
+                    for index in 0..<tasks.count {
+                        if tasks[index].id == taskId {
+                            var updates: [String: Any] = [:]
                             
-                            var request = URLRequest(url: url)
-                            request.httpMethod = "PATCH"
-                            request.addValue(anonKey, forHTTPHeaderField: "apikey")
-                            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                            request.addValue("return=minimal", forHTTPHeaderField: "Prefer")
+                            // Check if task is Confirmed
+                            let isConfirmed = tasks[index].isConfirmed ?? false
                             
-                            let body: [String: Any?] = [
-                                "is_done": newState,
-                                "done_at": doneAtStr
-                            ]
-                            
-                            do {
-                                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                                let (_, response) = try await URLSession.shared.data(for: request)
-                                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 300 {
-                                    logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode) ---")
+                            if isConfirmed {
+                                // --- Confirmed -> Done (just remove confirmation) ---
+                                tasks[index].isConfirmed = false
+                                updates["is_confirmed"] = false
+                                // Keep isDone as true, don't change doneAt
+                                
+                            } else if isMyTask {
+                                // --- My Task (Not Confirmed): Toggle Done/Undone ---
+                                let currentIsDone = tasks[index].isDone
+                                let newState = !currentIsDone
+                                
+                                tasks[index].isDone = newState
+                                let doneAtStr = newState ? ISO8601DateFormatter().string(from: Date()) : nil
+                                tasks[index].doneAt = doneAtStr
+                                
+                                updates["is_done"] = newState
+                                updates["done_at"] = newState ? (doneAtStr as Any) : NSNull()
+                                
+                            } else {
+                                // --- Partner Task (Not Confirmed): Done -> Confirmed ---
+                                if tasks[index].isDone {
+                                    tasks[index].isConfirmed = true
+                                    updates["is_confirmed"] = true
+                                } else {
+                                    // Partner hasn't finished yet. Do nothing.
+                                    return .result()
                                 }
-                            } catch {
-                                logger.error("--- [Swift] Network Error: \(error.localizedDescription) ---")
                             }
-                        }
-                    } else {
-                        // Partner Task: Confirm if Done
-                        if tasks[index].isDone {
-                            // Confirm -> Mark as Confirmed
-                            tasks[index].isConfirmed = true
                             
-                            // Save Local
+                            // --- Save Local ---
                             if let newData = try? JSONEncoder().encode(tasks),
                                let newJsonString = String(data: newData, encoding: .utf8) {
                                 userDefaults?.set(newJsonString, forKey: key)
                             }
                             
-                            // Sync to Supabase (PATCH)
-                            if let urlStr = userDefaults?.string(forKey: "supabase_url"),
+                            // --- Sync to Supabase (PATCH) ---
+                            if !updates.isEmpty,
+                               let urlStr = userDefaults?.string(forKey: "supabase_url"),
                                let anonKey = userDefaults?.string(forKey: "supabase_anon_key"),
                                let token = userDefaults?.string(forKey: "supabase_access_token"),
                                let url = URL(string: "\(urlStr)/rest/v1/tasks?id=eq.\(taskId)") {
@@ -155,24 +148,27 @@ struct ToggleTaskIntent: AppIntent {
                                 request.addValue("application/json", forHTTPHeaderField: "Content-Type")
                                 request.addValue("return=minimal", forHTTPHeaderField: "Prefer")
                                 
-                                let body: [String: Any?] = [
-                                    "is_confirmed": true
-                                ]
-                                
                                 do {
-                                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                                    let (_, response) = try await URLSession.shared.data(for: request)
-                                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 300 {
-                                        logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode) ---")
+                                    request.httpBody = try JSONSerialization.data(withJSONObject: updates)
+                                    logger.info("--- [Swift] Sending PATCH request to \(url.absoluteString) ---")
+                                    let (data, response) = try await URLSession.shared.data(for: request)
+                                    if let httpResponse = response as? HTTPURLResponse {
+                                        logger.info("--- [Swift] Response Status: \(httpResponse.statusCode) ---")
+                                        if httpResponse.statusCode >= 300 {
+                                            let bodyStr = String(data: data, encoding: .utf8) ?? "No Body"
+                                            logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode), Body: \(bodyStr) ---")
+                                        }
                                     }
                                 } catch {
                                     logger.error("--- [Swift] Network Error: \(error.localizedDescription) ---")
                                 }
                             }
+                            
+                            // Reload timeline
+                            WidgetCenter.shared.reloadAllTimelines()
+                            return .result()
                         }
-                        // If not done, do nothing
                     }
-                    
                     return .result()
                 }
             }
@@ -218,7 +214,7 @@ struct Provider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: SelectTaskModeIntent, in context: Context) async -> SimpleEntry {
         SimpleEntry(date: Date(), tasks: [
-            Task(id: "1", title: "Sample Task", isDone: false, doneAt: nil, createdAt: "", resetType: nil, resetValue: nil, scheduledResetAt: nil, requiresConfirmation: nil)
+            Task(id: "1", title: "Sample Task", isDone: false, doneAt: nil, createdAt: "", resetType: nil, resetValue: nil, scheduledResetAt: nil)
         ], mode: configuration.mode, partnerName: nil)
     }
     
@@ -431,7 +427,7 @@ struct MessageWidgetEntryView : View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TaskGridView(tasks: entry.tasks, family: family, mode: entry.mode)
+                TaskGridView(tasks: entry.tasks, family: family, isMyTask: entry.mode == .me, mode: entry.mode)
             }
         }
         .padding(8)
@@ -461,7 +457,10 @@ struct MessageWidgetEntryView : View {
 struct TaskGridView: View {
     let tasks: [Task]
     let family: WidgetFamily
+    let isMyTask: Bool
     let mode: TaskMode
+    
+    let spacing: CGFloat = 12
     
     var body: some View {
         GeometryReader { geo in
@@ -508,7 +507,7 @@ struct TaskGridView: View {
     @ViewBuilder
     func taskButton(for task: Task, width: CGFloat, height: CGFloat) -> some View {
         if #available(iOS 17.0, *) {
-            Button(intent: ToggleTaskIntent(taskId: task.id)) {
+            Button(intent: ToggleTaskIntent(taskId: task.id, isMyTask: isMyTask)) {
                 TaskCardView(task: task)
             }
             .buttonStyle(.plain)

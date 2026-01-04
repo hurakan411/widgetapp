@@ -60,7 +60,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   
@@ -73,13 +73,32 @@ class _HomeScreenState extends State<HomeScreen> {
   
   Stream<List<Task>>? _myTasksStream;
   final Set<String> _deletingTaskIds = {}; // Track tasks currently animating out
+  final Set<String> _confirmedTaskIds = {}; // Track tasks optimistically confirmed
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeSupabase();
     // Setup widget
     HomeWidget.setAppGroupId(appGroupId);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _supabaseService.checkAndResetDailyTasks();
+      setState(() {
+        _myTasksStream = _supabaseService.getTasksStream();
+      });
+      _syncToWidget();
+    }
   }
 
   Future<void> _initializeSupabase() async {
@@ -94,6 +113,9 @@ class _HomeScreenState extends State<HomeScreen> {
         await _supabaseService.updateProfile("User_${user.id.substring(0, 4)}");
       }
       
+      // Check and reset daily tasks
+      await _supabaseService.checkAndResetDailyTasks();
+      
       // Initialize Stream
       setState(() {
         _myTasksStream = _supabaseService.getTasksStream();
@@ -101,6 +123,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     await _loadPartners();
+    _syncToWidget();
   }
 
   Future<void> _loadPartners() async {
@@ -129,8 +152,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // --- Task Operations (Supabase) ---
 
-  Future<void> _addTask(String title, String? targetPartnerId, bool requiresConfirmation, ResetType resetType, int? resetValue) async {
-    await _supabaseService.addTask(title, targetPartnerId, requiresConfirmation: requiresConfirmation, resetType: resetType, resetValue: resetValue);
+  Future<void> _addTask(String title, String? targetPartnerId, ResetType resetType, int? resetValue) async {
+    await _supabaseService.addTask(title, targetPartnerId, resetType: resetType, resetValue: resetValue);
     _updateWidget();
   }
 
@@ -143,41 +166,53 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _toggleTask(Task task, bool isPartnerPage) async {
-    if (!isPartnerPage) {
-      // My Task: Toggle Done/Undone
+    // First, check if task is Confirmed
+    if (task.isConfirmed) {
+      // Confirmed -> Done (just remove confirmation)
+      setState(() {
+        _confirmedTaskIds.remove(task.id);
+      });
+      
+      try {
+        await _supabaseService.unconfirmTask(task.id);
+      } catch (e) {
+        print("Error undoing confirmation: $e");
+      }
+    } else if (!isPartnerPage) {
+      // My Task (Not Confirmed): Toggle Done/Undone
       await _supabaseService.toggleTask(task.id, !task.isDone);
     } else {
-      // Partner's Task
+      // Partner's Task (Not Confirmed)
       if (task.isDone) {
-        // Confirm logic: If partner's task is done, tapping it confirms it.
+        // Done -> Confirmed
         setState(() {
-          _deletingTaskIds.add(task.id);
+          _confirmedTaskIds.add(task.id);
         });
         
-        await Future.delayed(const Duration(milliseconds: 1500));
-        
-        await _supabaseService.confirmTask(task.id);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Task Confirmed!")));
-        
-        if (mounted) {
+        try {
+          await _supabaseService.confirmTask(task.id);
+        } catch (e) {
+          print("Error confirming task: $e");
           setState(() {
-            _deletingTaskIds.remove(task.id);
-            _myTasksStream = _supabaseService.getTasksStream();
+            _confirmedTaskIds.remove(task.id); // Revert if failed
           });
         }
       }
-      // If not done, do nothing (Read-only)
+      // If partner hasn't finished (task.isDone == false), do nothing
     }
     
     // Refresh stream
     setState(() {
       _myTasksStream = _supabaseService.getTasksStream();
     });
+    
+    // Wait a bit for DB propagation before syncing widget
+    await Future.delayed(const Duration(milliseconds: 500));
     _updateWidget();
   }
 
-  Future<void> _editTask(String taskId, String newTitle, bool requiresConfirmation, ResetType resetType, int? resetValue) async {
-    await _supabaseService.updateTask(taskId, title: newTitle, requiresConfirmation: requiresConfirmation, resetType: resetType, resetValue: resetValue);
+  Future<void> _editTask(String taskId, String newTitle, ResetType resetType, int? resetValue) async {
+    await _supabaseService.updateTask(taskId, title: newTitle, resetType: resetType, resetValue: resetValue);
     _updateWidget();
   }
 
@@ -195,10 +230,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _syncToWidget() async {
     // Helper to calculate scheduledResetAt
     Task updateTaskForWidget(Task task) {
-      if (task.resetType == ResetType.daily && task.resetValue != null) {
+      Task t = task;
+      // Apply optimistic confirmation
+      if (_confirmedTaskIds.contains(t.id)) {
+        t = t.copyWith(isConfirmed: true);
+      }
+
+      if (t.resetType == ResetType.daily && t.resetValue != null) {
         final now = DateTime.now();
-        final hour = task.resetValue! ~/ 100;
-        final minute = task.resetValue! % 100;
+        final hour = t.resetValue! ~/ 100;
+        final minute = t.resetValue! % 100;
         
         DateTime scheduled = DateTime(now.year, now.month, now.day, hour, minute);
         
@@ -207,14 +248,21 @@ class _HomeScreenState extends State<HomeScreen> {
           scheduled = scheduled.add(const Duration(days: 1));
         }
         
-        return task.copyWith(scheduledResetAt: scheduled);
+        return t.copyWith(scheduledResetAt: scheduled);
       }
-      return task;
+      return t;
+    }
+    
+    // Save Supabase Credentials for Widget
+    await HomeWidget.saveWidgetData('supabase_url', AppConfig.supabaseUrl);
+    await HomeWidget.saveWidgetData('supabase_anon_key', AppConfig.supabaseAnonKey);
+    final session = _supabaseService.currentSession;
+    if (session != null) {
+      await HomeWidget.saveWidgetData('supabase_access_token', session.accessToken);
     }
 
     // Fetch my tasks
-    final myTasksStream = _supabaseService.getTasksStream();
-    final myTasks = await myTasksStream.first; // Get current snapshot
+    final myTasks = await _supabaseService.getTasksOnce();
     
     final myTasksForWidget = myTasks.map((t) => updateTaskForWidget(t)).toList();
     
@@ -226,8 +274,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // Fetch partner tasks
     for (int i = 0; i < _partnerIds.length; i++) {
       final pid = _partnerIds[i];
-      final pTasksStream = _supabaseService.getPartnerTasksStream(pid);
-      final pTasks = await pTasksStream.first;
+      final pTasks = await _supabaseService.getPartnerTasksOnce(pid);
       
       final pTasksForWidget = pTasks.map((t) => updateTaskForWidget(t)).toList();
       
@@ -249,7 +296,6 @@ class _HomeScreenState extends State<HomeScreen> {
     final isEditing = taskToEdit != null;
     final controller = TextEditingController(text: taskToEdit?.title ?? '');
     String? selectedTargetPartner = isEditing ? taskToEdit.targetPartnerId : partnerId;
-    bool requiresConfirmation = taskToEdit?.requiresConfirmation ?? false;
     ResetType resetType = taskToEdit?.resetType ?? ResetType.none;
     
     int? resetValue = taskToEdit?.resetValue;
@@ -328,7 +374,6 @@ class _HomeScreenState extends State<HomeScreen> {
                             setDialogState(() {
                               resetType = val!;
                               if (resetType != ResetType.none) {
-                                requiresConfirmation = false;
                                 // Set default reset value if not set
                                 if (resetValue == null) {
                                   resetValue = 400; // 04:00
@@ -388,6 +433,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButtonFormField<String?>(
+                            isExpanded: true,
                             value: selectedTargetPartner,
                             decoration: const InputDecoration(
                               labelText: "パートナーと共有",
@@ -395,10 +441,19 @@ class _HomeScreenState extends State<HomeScreen> {
                               border: InputBorder.none,
                             ),
                             items: [
-                              const DropdownMenuItem(value: null, child: Text("指定なし（全員に公開 / 自分のみ）")),
+                              const DropdownMenuItem(
+                                value: null, 
+                                child: Text(
+                                  "指定なし（全員に公開 / 自分のみ）",
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
                               ..._partnerIds.map((pid) => DropdownMenuItem(
                                 value: pid,
-                                child: Text(_partnerNames[pid] ?? pid),
+                                child: Text(
+                                  _partnerNames[pid] ?? pid,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                               )),
                             ],
                             onChanged: (value) {
@@ -457,9 +512,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             onTap: () {
                               if (controller.text.isNotEmpty) {
                                 if (isEditing) {
-                                  _editTask(taskToEdit!.id, controller.text, requiresConfirmation, resetType, resetValue);
+                                  _editTask(taskToEdit!.id, controller.text, resetType, resetValue);
                                 } else {
-                                  _addTask(controller.text, selectedTargetPartner, requiresConfirmation, resetType, resetValue);
+                                  _addTask(controller.text, selectedTargetPartner, resetType, resetValue);
                                 }
                                 Navigator.pop(context);
                               }
@@ -665,25 +720,41 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     )
-                  : ListView.builder(
-                      padding: const EdgeInsets.only(bottom: 80), // Space for FAB
-                      itemCount: tasks.length,
-                      itemBuilder: (context, index) {
-                        final task = tasks[index];
-                        final isDeleting = _deletingTaskIds.contains(task.id);
-                        return AnimatedCrossFade(
-                          duration: const Duration(milliseconds: 1500),
-                          firstChild: NeumorphicTaskCard(
-                            task: task,
-                            onTap: () => _toggleTask(task, isPartnerPage),
-                            onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
-                            partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
-                            isReadOnly: isPartnerPage,
-                          ),
-                          secondChild: const SizedBox(width: double.infinity, height: 0),
-                          crossFadeState: isDeleting ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-                        );
+                  : RefreshIndicator(
+                      onRefresh: () async {
+                        await _supabaseService.checkAndResetDailyTasks();
+                        setState(() {
+                           // Re-trigger stream if needed, though stream updates automatically
+                           if (isPartnerPage) {
+                             // No need to re-assign stream for partner page as it's created in build
+                           } else {
+                             _myTasksStream = _supabaseService.getTasksStream();
+                           }
+                        });
                       },
+                      child: ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 80), // Space for FAB
+                        itemCount: tasks.length,
+                        itemBuilder: (context, index) {
+                          var task = tasks[index];
+                          if (_confirmedTaskIds.contains(task.id)) {
+                            task = task.copyWith(isConfirmed: true);
+                          }
+                          final isDeleting = _deletingTaskIds.contains(task.id);
+                          return AnimatedCrossFade(
+                            duration: const Duration(milliseconds: 1500),
+                            firstChild: NeumorphicTaskCard(
+                              task: task,
+                              onTap: () => _toggleTask(task, isPartnerPage),
+                              onEdit: () => _showTaskDialog(partnerId: partnerId, taskToEdit: task),
+                              partnerName: task.targetPartnerId != null ? _partnerNames[task.targetPartnerId] : null,
+                              isReadOnly: isPartnerPage,
+                            ),
+                            secondChild: const SizedBox(width: double.infinity, height: 0),
+                            crossFadeState: isDeleting ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                          );
+                        },
+                      ),
                     ),
             ),
           ],
@@ -753,7 +824,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     // Page Indicator
                     Row(
-                      children: List.generate(1 + (_partnerIds.isEmpty ? 1 : _partnerIds.length), (index) {
+                      children: List.generate(1 + _partnerIds.length + (_partnerIds.length < 3 ? 1 : 0), (index) {
                         return Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 4.0),
                           child: _buildDot(index),
@@ -784,17 +855,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   
                   // Partner Pages
-                  if (_partnerIds.isEmpty)
-                    _buildEmptyPartnerPage()
-                  else
-                    ..._partnerIds.map((pid) => _buildTaskPage(
-                      title: _partnerNames[pid] ?? "PARTNER",
-                      subtitle: "PARTNER'S TASKS",
-                      partnerId: pid,
-                      accentColor: AppColors.terracotta,
-                      isPartnerPage: true,
-                      icon: Icons.favorite,
-                    )).toList(),
+                  ..._partnerIds.map((pid) => _buildTaskPage(
+                    title: _partnerNames[pid] ?? "PARTNER",
+                    subtitle: "PARTNER'S TASKS",
+                    partnerId: pid,
+                    accentColor: AppColors.terracotta,
+                    isPartnerPage: true,
+                    icon: Icons.favorite,
+                  )).toList(),
+
+                  // Add Partner Page (if less than 3 partners)
+                  if (_partnerIds.length < 3)
+                    _buildAddPartnerPage(),
                 ],
               ),
             ),
@@ -843,16 +915,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
   
-  Widget _buildEmptyPartnerPage() {
+  Widget _buildAddPartnerPage() {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.favorite_border, size: 60, color: AppColors.textSecondary.withOpacity(0.5)),
+          Icon(Icons.person_add, size: 60, color: AppColors.textSecondary.withOpacity(0.5)),
           const SizedBox(height: 20),
-          const Text(
-            "No Partner Set",
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textSecondary),
+          Text(
+            _partnerIds.isEmpty ? "No Partner Set" : "Add Another Partner",
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textSecondary),
           ),
           const SizedBox(height: 20),
           ElevatedButton(

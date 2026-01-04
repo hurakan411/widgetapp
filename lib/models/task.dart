@@ -16,7 +16,6 @@ class Task {
   final String? targetPartnerId;
 
   // Confirmation
-  final bool requiresConfirmation;
   final bool isConfirmed;
 
   Task({
@@ -29,7 +28,6 @@ class Task {
     this.resetValue,
     this.scheduledResetAt,
     this.targetPartnerId,
-    this.requiresConfirmation = false,
     this.isConfirmed = false,
   });
 
@@ -42,7 +40,6 @@ class Task {
     int? resetValue,
     DateTime? scheduledResetAt,
     String? targetPartnerId,
-    bool? requiresConfirmation,
     bool? isConfirmed,
   }) {
     return Task(
@@ -55,7 +52,6 @@ class Task {
       resetValue: resetValue ?? this.resetValue,
       scheduledResetAt: scheduledResetAt ?? this.scheduledResetAt,
       targetPartnerId: targetPartnerId ?? this.targetPartnerId,
-      requiresConfirmation: requiresConfirmation ?? this.requiresConfirmation,
       isConfirmed: isConfirmed ?? this.isConfirmed,
     );
   }
@@ -72,7 +68,6 @@ class Task {
       'resetValue': resetValue,
       'scheduledResetAt': scheduledResetAt?.toIso8601String(),
       'targetPartnerId': targetPartnerId,
-      'requiresConfirmation': requiresConfirmation,
       'isConfirmed': isConfirmed,
     };
   }
@@ -89,7 +84,6 @@ class Task {
       resetValue: json['resetValue'],
       scheduledResetAt: json['scheduledResetAt'] != null ? DateTime.parse(json['scheduledResetAt']) : null,
       targetPartnerId: json['targetPartnerId'],
-      requiresConfirmation: json['requiresConfirmation'] ?? false,
       isConfirmed: json['isConfirmed'] ?? false,
     );
   }

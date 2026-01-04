@@ -20,6 +20,9 @@ class NeumorphicTaskCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (task.isConfirmed) {
+       print("Task ${task.title} is CONFIRMED in UI");
+    }
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -107,10 +110,10 @@ class NeumorphicTaskCard extends StatelessWidget {
                      Text(
                       "CONFIRMED",
                       style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
                         color: AppColors.mustardYellow,
-                        letterSpacing: 1.0,
+                        letterSpacing: 1.2,
                       ),
                     )
                   else if (task.isDone && task.doneAt != null)

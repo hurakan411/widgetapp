@@ -11,6 +11,7 @@ class SupabaseService {
   // --- Auth & Profile ---
 
   User? get currentUser => _client.auth.currentUser;
+  Session? get currentSession => _client.auth.currentSession;
 
   Future<void> signInAnonymously() async {
     if (currentUser == null) {
@@ -55,6 +56,19 @@ class SupabaseService {
         .order('created_at')
         .map((data) => data.map((json) => _toTask(json)).toList());
   }
+
+  Future<List<Task>> getTasksOnce() async {
+    final user = currentUser;
+    if (user == null) return [];
+
+    final response = await _client
+        .from('tasks')
+        .select()
+        .eq('user_id', user.id)
+        .order('created_at');
+    
+    return (response as List).map((json) => _toTask(json)).toList();
+  }
   
   Stream<List<Task>> getPartnerTasksStream(String partnerId) {
     return _client
@@ -65,7 +79,17 @@ class SupabaseService {
         .map((data) => data.map((json) => _toTask(json)).toList());
   }
 
-  Future<void> addTask(String title, String? targetPartnerId, {bool requiresConfirmation = false, ResetType resetType = ResetType.none, int? resetValue}) async {
+  Future<List<Task>> getPartnerTasksOnce(String partnerId) async {
+    final response = await _client
+        .from('tasks')
+        .select()
+        .eq('user_id', partnerId)
+        .order('created_at');
+    
+    return (response as List).map((json) => _toTask(json)).toList();
+  }
+
+  Future<void> addTask(String title, String? targetPartnerId, {ResetType resetType = ResetType.none, int? resetValue}) async {
     final user = currentUser;
     if (user == null) return;
 
@@ -74,7 +98,6 @@ class SupabaseService {
       'title': title,
       'is_done': false,
       'target_partner_id': targetPartnerId,
-      'requires_confirmation': requiresConfirmation,
       'reset_type': resetType == ResetType.none ? null : resetType.name,
       'reset_value': resetValue,
     });
@@ -87,10 +110,9 @@ class SupabaseService {
     }).eq('id', taskId);
   }
 
-  Future<void> updateTask(String taskId, {String? title, bool? requiresConfirmation, ResetType? resetType, int? resetValue}) async {
+  Future<void> updateTask(String taskId, {String? title, ResetType? resetType, int? resetValue}) async {
     final updates = <String, dynamic>{};
     if (title != null) updates['title'] = title;
-    if (requiresConfirmation != null) updates['requires_confirmation'] = requiresConfirmation;
     if (resetType != null) updates['reset_type'] = resetType == ResetType.none ? null : resetType.name;
     if (resetValue != null) updates['reset_value'] = resetValue;
     
@@ -106,6 +128,13 @@ class SupabaseService {
     }).eq('id', taskId);
   }
 
+  Future<void> unconfirmTask(String taskId) async {
+    // Remove confirmation but keep task as done
+    await _client.from('tasks').update({
+      'is_confirmed': false,
+    }).eq('id', taskId);
+  }
+
   // Helper to convert Supabase JSON (snake_case) to Task
   Task _toTask(Map<String, dynamic> json) {
     return Task(
@@ -115,7 +144,6 @@ class SupabaseService {
       doneAt: json['done_at'] != null ? DateTime.parse(json['done_at']) : null,
       createdAt: DateTime.parse(json['created_at']),
       targetPartnerId: json['target_partner_id'],
-      requiresConfirmation: json['requires_confirmation'] ?? false,
       isConfirmed: json['is_confirmed'] ?? false,
       resetType: _parseResetType(json['reset_type']),
       resetValue: json['reset_value'],
@@ -158,5 +186,65 @@ class SupabaseService {
         .eq('user_id', user.id);
     
     return (response as List).map((e) => e['partner_id'] as String).toList();
+  }
+
+  Future<void> checkAndResetDailyTasks() async {
+    final user = currentUser;
+    if (user == null) return;
+
+    // Fetch done tasks with daily reset
+    final response = await _client
+        .from('tasks')
+        .select()
+        .eq('user_id', user.id)
+        .eq('is_done', true)
+        .eq('reset_type', 'daily');
+
+    final tasks = (response as List).map((json) => _toTask(json)).toList();
+    final now = DateTime.now();
+
+    for (final task in tasks) {
+      if (task.resetValue == null || task.doneAt == null) continue;
+
+      final hour = task.resetValue! ~/ 100;
+      final minute = task.resetValue! % 100;
+      
+      // Today's reset time
+      final resetTimeToday = DateTime(now.year, now.month, now.day, hour, minute);
+      
+      // If now is past reset time
+      if (now.isAfter(resetTimeToday)) {
+        // If doneAt is before reset time, it means it was done in the previous cycle
+        if (task.doneAt!.isBefore(resetTimeToday)) {
+          await resetTaskStatus(task.id);
+        }
+      } else {
+        // If now is before reset time (e.g. 02:00, reset at 04:00)
+        // Check if doneAt is before YESTERDAY's reset time?
+        // No, if it's not reset time yet, we don't reset.
+        // Wait, what if I didn't open the app yesterday?
+        // Example: Reset 04:00. Now 03:00 (Day 2). Done at 23:00 (Day 0).
+        // Yesterday's reset was 04:00 (Day 1).
+        // It should have been reset at 04:00 (Day 1).
+        
+        // Logic: Find the *latest* reset time that has passed.
+        // If doneAt is before that time, reset.
+        
+        final resetTimeYesterday = resetTimeToday.subtract(const Duration(days: 1));
+        if (now.isAfter(resetTimeYesterday)) {
+             if (task.doneAt!.isBefore(resetTimeYesterday)) {
+                await resetTaskStatus(task.id);
+             }
+        }
+      }
+    }
+  }
+
+  Future<void> resetTaskStatus(String taskId) async {
+    await _client.from('tasks').update({
+      'is_done': false,
+      'is_confirmed': false,
+      'done_at': null,
+    }).eq('id', taskId);
   }
 }
