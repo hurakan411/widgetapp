@@ -61,14 +61,14 @@ class Task {
     return {
       'id': id,
       'title': title,
-      'isDone': isDone,
-      'doneAt': doneAt?.toIso8601String(),
-      'createdAt': createdAt.toIso8601String(),
-      'resetType': resetType.index,
-      'resetValue': resetValue,
-      'scheduledResetAt': scheduledResetAt?.toIso8601String(),
-      'targetPartnerId': targetPartnerId,
-      'isConfirmed': isConfirmed,
+      'is_done': isDone,
+      'done_at': doneAt?.toIso8601String(),
+      'created_at': createdAt.toIso8601String(),
+      'reset_type': resetType.index,
+      'reset_value': resetValue,
+      'scheduled_reset_at': scheduledResetAt?.toIso8601String(),
+      'target_partner_id': targetPartnerId,
+      'is_confirmed': isConfirmed,
     };
   }
 
@@ -77,14 +77,14 @@ class Task {
     return Task(
       id: json['id'],
       title: json['title'],
-      isDone: json['isDone'] ?? false,
-      doneAt: json['doneAt'] != null ? DateTime.parse(json['doneAt']) : null,
-      createdAt: DateTime.parse(json['createdAt']),
-      resetType: ResetType.values[json['resetType'] ?? 0],
-      resetValue: json['resetValue'],
-      scheduledResetAt: json['scheduledResetAt'] != null ? DateTime.parse(json['scheduledResetAt']) : null,
-      targetPartnerId: json['targetPartnerId'],
-      isConfirmed: json['isConfirmed'] ?? false,
+      isDone: json['is_done'] ?? false,
+      doneAt: json['done_at'] != null ? DateTime.parse(json['done_at']) : null,
+      createdAt: DateTime.parse(json['created_at']),
+      resetType: ResetType.values[json['reset_type'] ?? 0],
+      resetValue: json['reset_value'],
+      scheduledResetAt: json['scheduled_reset_at'] != null ? DateTime.parse(json['scheduled_reset_at']) : null,
+      targetPartnerId: json['target_partner_id'],
+      isConfirmed: json['is_confirmed'] ?? false,
     );
   }
 }

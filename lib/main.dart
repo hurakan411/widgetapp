@@ -74,6 +74,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Stream<List<Task>>? _myTasksStream;
   final Set<String> _deletingTaskIds = {}; // Track tasks currently animating out
   final Set<String> _confirmedTaskIds = {}; // Track tasks optimistically confirmed
+  int _refreshKey = 0; // Key to force stream recreation
 
   @override
   void initState() {
@@ -95,6 +96,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _supabaseService.checkAndResetDailyTasks();
       setState(() {
+        _refreshKey++; // Force stream recreation
+        _confirmedTaskIds.clear(); // Clear optimistic updates
         _myTasksStream = _supabaseService.getTasksStream();
       });
       _syncToWidget();
@@ -166,17 +169,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleTask(Task task, bool isPartnerPage) async {
-    // First, check if task is Confirmed
     if (task.isConfirmed) {
-      // Confirmed -> Done (just remove confirmation)
-      setState(() {
-        _confirmedTaskIds.remove(task.id);
-      });
-      
-      try {
-        await _supabaseService.unconfirmTask(task.id);
-      } catch (e) {
-        print("Error undoing confirmation: $e");
+      // Task is Confirmed
+      if (!isPartnerPage) {
+        // My Confirmed Task -> Undone (reset everything)
+        setState(() {
+          _confirmedTaskIds.remove(task.id);
+        });
+        
+        try {
+          await _supabaseService.resetTaskStatus(task.id);
+        } catch (e) {
+          print("Error resetting task: $e");
+        }
+      } else {
+        // Partner's Confirmed Task -> Done (just remove confirmation)
+        setState(() {
+          _confirmedTaskIds.remove(task.id);
+        });
+        
+        try {
+          await _supabaseService.unconfirmTask(task.id);
+        } catch (e) {
+          print("Error undoing confirmation: $e");
+        }
       }
     } else if (!isPartnerPage) {
       // My Task (Not Confirmed): Toggle Done/Undone
@@ -260,9 +276,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (session != null) {
       await HomeWidget.saveWidgetData('supabase_access_token', session.accessToken);
     }
+    
+    // Save user IDs for widget refresh
+    final currentUser = _supabaseService.currentUser;
+    if (currentUser != null) {
+      await HomeWidget.saveWidgetData('current_user_id', currentUser.id);
+    }
+    for (int i = 0; i < _partnerIds.length; i++) {
+      await HomeWidget.saveWidgetData('partner_id_$i', _partnerIds[i]);
+    }
 
     // Fetch my tasks
     final myTasks = await _supabaseService.getTasksOnce();
+    
+    // Debug: Show actual DB state
+    for (var t in myTasks) {
+      print("DB State: ${t.title} - isDone=${t.isDone}, isConfirmed=${t.isConfirmed}");
+    }
     
     final myTasksForWidget = myTasks.map((t) => updateTaskForWidget(t)).toList();
     
@@ -275,6 +305,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     for (int i = 0; i < _partnerIds.length; i++) {
       final pid = _partnerIds[i];
       final pTasks = await _supabaseService.getPartnerTasksOnce(pid);
+      
+      // Debug: Show partner task DB state
+      print("Partner $pid tasks from DB:");
+      for (var t in pTasks) {
+        print("  DB State: ${t.title} - isDone=${t.isDone}, isConfirmed=${t.isConfirmed}");
+      }
       
       final pTasksForWidget = pTasks.map((t) => updateTaskForWidget(t)).toList();
       
@@ -593,7 +629,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       },
                     ),
                   const SizedBox(height: 16),
-                  if (_partnerIds.length < 3) ...[
+                  if (_partnerIds.length < 2) ...[
                     const Divider(),
                     TextField(
                       controller: idController,
@@ -677,11 +713,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     required IconData icon,
     bool isPartnerPage = false,
   }) {
+    // Use _refreshKey to force stream recreation on pull-to-refresh
     final stream = isPartnerPage 
         ? _supabaseService.getPartnerTasksStream(partnerId!) 
         : (_myTasksStream ?? const Stream.empty());
 
     return StreamBuilder<List<Task>>(
+      key: ValueKey('${partnerId ?? "my"}_$_refreshKey'),
       stream: stream,
       builder: (context, snapshot) {
         final tasks = snapshot.data ?? [];
@@ -724,13 +762,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       onRefresh: () async {
                         await _supabaseService.checkAndResetDailyTasks();
                         setState(() {
-                           // Re-trigger stream if needed, though stream updates automatically
-                           if (isPartnerPage) {
-                             // No need to re-assign stream for partner page as it's created in build
-                           } else {
-                             _myTasksStream = _supabaseService.getTasksStream();
-                           }
+                           // Increment refresh key to force stream recreation
+                           _refreshKey++;
+                           _confirmedTaskIds.clear(); // Clear optimistic updates
+                           _myTasksStream = _supabaseService.getTasksStream();
                         });
+                        _syncToWidget();
                       },
                       child: ListView.builder(
                         padding: const EdgeInsets.only(bottom: 80), // Space for FAB
@@ -824,7 +861,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     ),
                     // Page Indicator
                     Row(
-                      children: List.generate(1 + _partnerIds.length + (_partnerIds.length < 3 ? 1 : 0), (index) {
+                      children: List.generate(1 + _partnerIds.length + (_partnerIds.length < 2 ? 1 : 0), (index) {
                         return Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 4.0),
                           child: _buildDot(index),
@@ -865,7 +902,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   )).toList(),
 
                   // Add Partner Page (if less than 3 partners)
-                  if (_partnerIds.length < 3)
+                  if (_partnerIds.length < 2)
                     _buildAddPartnerPage(),
                 ],
               ),

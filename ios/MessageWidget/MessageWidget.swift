@@ -17,6 +17,19 @@ struct Task: Codable, Identifiable {
     // Confirmation
     var isConfirmed: Bool?
     
+    // CodingKeys to handle both camelCase (app) and snake_case (Supabase)
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case isDone = "is_done"
+        case doneAt = "done_at"
+        case createdAt = "created_at"
+        case resetType = "reset_type"
+        case resetValue = "reset_value"
+        case scheduledResetAt = "scheduled_reset_at"
+        case isConfirmed = "is_confirmed"
+    }
+    
     // Helper to check if task is effectively done
     var isEffectivelyDone: Bool {
         if !isDone { return false }
@@ -77,7 +90,7 @@ struct ToggleTaskIntent: AppIntent {
         let userDefaults = UserDefaults(suiteName: suiteName)
         
         // Try to find and toggle task in both keys
-        let keys = ["my_tasks_key", "partner_tasks_key_0", "partner_tasks_key_1", "partner_tasks_key_2"]
+        let keys = ["my_tasks_key", "partner_tasks_key_0", "partner_tasks_key_1"]
         
         for key in keys {
             if let jsonString = userDefaults?.string(forKey: key),
@@ -100,10 +113,21 @@ struct ToggleTaskIntent: AppIntent {
                             let isConfirmed = tasks[index].isConfirmed ?? false
                             
                             if isConfirmed {
-                                // --- Confirmed -> Done (just remove confirmation) ---
-                                tasks[index].isConfirmed = false
-                                updates["is_confirmed"] = false
-                                // Keep isDone as true, don't change doneAt
+                                if isMyTask {
+                                    // --- My Confirmed Task -> Undone (reset everything) ---
+                                    tasks[index].isDone = false
+                                    tasks[index].isConfirmed = false
+                                    tasks[index].doneAt = nil
+                                    
+                                    updates["is_done"] = false
+                                    updates["is_confirmed"] = false
+                                    updates["done_at"] = NSNull()
+                                } else {
+                                    // --- Partner's Confirmed Task -> Done (just remove confirmation) ---
+                                    tasks[index].isConfirmed = false
+                                    updates["is_confirmed"] = false
+                                    // Keep isDone as true, don't change doneAt
+                                }
                                 
                             } else if isMyTask {
                                 // --- My Task (Not Confirmed): Toggle Done/Undone ---
@@ -178,6 +202,97 @@ struct ToggleTaskIntent: AppIntent {
     }
 }
 
+// 1.5. Intent for Refreshing Widget Data from Supabase
+@available(iOS 17.0, *)
+struct RefreshIntent: AppIntent {
+    static var title: LocalizedStringResource = "Refresh Tasks"
+    
+    @Parameter(title: "Mode")
+    var mode: TaskMode
+    
+    init() {}
+    
+    init(mode: TaskMode) {
+        self.mode = mode
+    }
+    
+    func perform() async throws -> some IntentResult {
+        let logger = Logger(subsystem: "com.shashinoguchi.widgetTask", category: "Refresh")
+        logger.info("--- [Swift] RefreshIntent performed for mode: \(mode.rawValue) ---")
+        
+        let suiteName = "group.com.shashinoguchi.widgetTask"
+        let userDefaults = UserDefaults(suiteName: suiteName)
+        
+        guard let urlStr = userDefaults?.string(forKey: "supabase_url"),
+              let anonKey = userDefaults?.string(forKey: "supabase_anon_key"),
+              let token = userDefaults?.string(forKey: "supabase_access_token") else {
+            logger.error("--- [Swift] Missing Supabase credentials ---")
+            WidgetCenter.shared.reloadAllTimelines()
+            return .result()
+        }
+        
+        // Determine which data to fetch based on mode
+        let key: String
+        let userId: String?
+        
+        switch mode {
+        case .me:
+            key = "my_tasks_key"
+            userId = userDefaults?.string(forKey: "current_user_id")
+        case .partner1:
+            key = "partner_tasks_key_0"
+            userId = userDefaults?.string(forKey: "partner_id_0")
+        case .partner2:
+            key = "partner_tasks_key_1"
+            userId = userDefaults?.string(forKey: "partner_id_1")
+        }
+        
+        guard let uid = userId, !uid.isEmpty else {
+            logger.error("--- [Swift] No user ID for mode \(mode.rawValue) ---")
+            WidgetCenter.shared.reloadAllTimelines()
+            return .result()
+        }
+        
+        // Fetch data from Supabase
+        guard let url = URL(string: "\(urlStr)/rest/v1/tasks?user_id=eq.\(uid)&order=created_at") else {
+            logger.error("--- [Swift] Invalid URL ---")
+            WidgetCenter.shared.reloadAllTimelines()
+            return .result()
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.addValue(anonKey, forHTTPHeaderField: "apikey")
+        request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                logger.info("--- [Swift] Refresh Response Status: \(httpResponse.statusCode) ---")
+                
+                if httpResponse.statusCode == 200 {
+                    // Save raw JSON string directly (no re-encoding)
+                    if let jsonString = String(data: data, encoding: .utf8) {
+                        userDefaults?.set(jsonString, forKey: key)
+                        logger.info("--- [Swift] Saved raw JSON to \(key) ---")
+                    }
+                } else {
+                    let bodyStr = String(data: data, encoding: .utf8) ?? "No Body"
+                    logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode), Body: \(bodyStr) ---")
+                }
+            }
+        } catch {
+            logger.error("--- [Swift] Refresh Network Error: \(error.localizedDescription) ---")
+        }
+        
+        // Reload timeline
+        WidgetCenter.shared.reloadAllTimelines()
+        return .result()
+    }
+}
+
 // 2. Intent for Configuration (Select Mode)
 @available(iOS 17.0, *)
 struct SelectTaskModeIntent: WidgetConfigurationIntent {
@@ -193,14 +308,12 @@ enum TaskMode: String, AppEnum {
     case me
     case partner1
     case partner2
-    case partner3
     
     static var typeDisplayRepresentation: TypeDisplayRepresentation = "Task Mode"
     static var caseDisplayRepresentations: [TaskMode : DisplayRepresentation] = [
         .me: "My Tasks",
         .partner1: "Partner 1",
-        .partner2: "Partner 2",
-        .partner3: "Partner 3"
+        .partner2: "Partner 2"
     ]
 }
 
@@ -241,9 +354,6 @@ struct Provider: AppIntentTimelineProvider {
         case .partner2:
             key = "partner_tasks_key_1"
             nameKey = "partner_name_key_1"
-        case .partner3:
-            key = "partner_tasks_key_2"
-            nameKey = "partner_name_key_2"
         }
         
         var tasks: [Task] = []
@@ -385,12 +495,23 @@ struct TaskCardView: View {
     
     func formatDoneTime(_ dateStr: String) -> String? {
         let isoFormatter = ISO8601DateFormatter()
+        
+        // Try with fractional seconds first
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let date = isoFormatter.date(from: dateStr) {
             let timeFormatter = DateFormatter()
             timeFormatter.dateFormat = "HH:mm"
             return timeFormatter.string(from: date)
         }
+        
+        // Fallback: try without fractional seconds
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: dateStr) {
+            let timeFormatter = DateFormatter()
+            timeFormatter.dateFormat = "HH:mm"
+            return timeFormatter.string(from: date)
+        }
+        
         return nil
     }
 }
@@ -409,6 +530,17 @@ struct MessageWidgetEntryView : View {
                     .tracking(1.5)
                     .lineLimit(1)
                 Spacer()
+                
+                // Refresh Button
+                if #available(iOS 17.0, *) {
+                    Button(intent: RefreshIntent(mode: entry.mode)) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.caption)
+                            .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+                
                 Image(systemName: entry.mode == .me ? "person.fill" : "heart.fill")
                     .font(.caption2)
                     .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
@@ -448,7 +580,6 @@ struct MessageWidgetEntryView : View {
         switch mode {
         case .partner1: return "PARTNER 1"
         case .partner2: return "PARTNER 2"
-        case .partner3: return "PARTNER 3"
         default: return "PARTNER"
         }
     }
