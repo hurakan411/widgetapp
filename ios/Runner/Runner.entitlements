@@ -6,5 +6,9 @@
 	<array>
 		<string>group.com.shashinoguchi.widgetTask</string>
 	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)group.com.shashinoguchi.widgetTask</string>
+	</array>
 </dict>
 </plist>

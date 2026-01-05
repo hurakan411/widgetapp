@@ -92,8 +92,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
+  void didChangeAppLifecycleState(AppLifecycleState state) async {
     if (state == AppLifecycleState.resumed) {
+      // Check widget debug log
+      final debugLog = await HomeWidget.getWidgetData<String>('widget_debug_log');
+      if (debugLog != null && debugLog.isNotEmpty) {
+        print("[Widget Debug] $debugLog");
+      }
+      
+      // Refresh session and update widget token
+      await _refreshAndSaveToken();
+      
       _supabaseService.checkAndResetDailyTasks();
       setState(() {
         _refreshKey++; // Force stream recreation
@@ -101,6 +110,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _myTasksStream = _supabaseService.getTasksStream();
       });
       _syncToWidget();
+    }
+  }
+  
+  Future<void> _refreshAndSaveToken() async {
+    try {
+      // Refresh the session
+      await Supabase.instance.client.auth.refreshSession();
+      
+      // Save updated tokens to widget
+      final session = _supabaseService.currentSession;
+      if (session != null) {
+        await HomeWidget.saveWidgetData('supabase_access_token', session.accessToken);
+        await HomeWidget.saveWidgetData('supabase_refresh_token', session.refreshToken);
+        print("[Auth] Tokens refreshed and saved to widget");
+      }
+    } catch (e) {
+      print("[Auth] Token refresh error: $e");
     }
   }
 
@@ -169,6 +195,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleTask(Task task, bool isPartnerPage) async {
+    print('[_toggleTask] Task: ${task.title}, isDone: ${task.isDone}, isConfirmed: ${task.isConfirmed}, isPartnerPage: $isPartnerPage');
+    
     if (task.isConfirmed) {
       // Task is Confirmed
       if (!isPartnerPage) {
@@ -244,6 +272,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _syncToWidget() async {
+    // Check widget debug log
+    final debugLog = await HomeWidget.getWidgetData<String>('widget_debug_log');
+    if (debugLog != null && debugLog.isNotEmpty) {
+      print("[Widget Debug] $debugLog");
+    }
+    
     // Helper to calculate scheduledResetAt
     Task updateTaskForWidget(Task task) {
       Task t = task;
@@ -275,6 +309,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final session = _supabaseService.currentSession;
     if (session != null) {
       await HomeWidget.saveWidgetData('supabase_access_token', session.accessToken);
+      await HomeWidget.saveWidgetData('supabase_refresh_token', session.refreshToken);
     }
     
     // Save user IDs for widget refresh
@@ -593,6 +628,117 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return "None";
   }
 
+  void _showEditPartnerDialog(String partnerId, String currentName) {
+    final idController = TextEditingController(text: partnerId);
+    final nameController = TextEditingController(text: currentName);
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.background,
+        title: const Text('Edit Partner', style: TextStyle(color: AppColors.textPrimary)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: idController,
+              decoration: const InputDecoration(
+                labelText: 'Partner ID',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Nickname',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          // Delete button
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _showDeletePartnerDialog(partnerId, currentName);
+            },
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final newId = idController.text.trim();
+              final newName = nameController.text.trim();
+              
+              if (newId.isEmpty) return;
+              
+              final prefs = await SharedPreferences.getInstance();
+              
+              // If ID changed, update the partner relationship
+              if (newId != partnerId) {
+                await _supabaseService.removePartner(partnerId);
+                await _supabaseService.addPartner(newId);
+                await prefs.remove('partner_nickname_$partnerId');
+              }
+              
+              // Save nickname
+              if (newName.isNotEmpty) {
+                await prefs.setString('partner_nickname_$newId', newName);
+              }
+              
+              await _loadPartners();
+              _syncToWidget();
+              Navigator.pop(context);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDeletePartnerDialog(String partnerId, String partnerName) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.background,
+        title: const Text('Delete Partner', style: TextStyle(color: AppColors.textPrimary)),
+        content: Text(
+          'Are you sure you want to remove "$partnerName" from your partners?\n\nThis will not delete their tasks.',
+          style: const TextStyle(color: AppColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () async {
+              await _supabaseService.removePartner(partnerId);
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.remove('partner_nickname_$partnerId');
+              await _loadPartners();
+              _syncToWidget();
+              Navigator.pop(context);
+              // Refresh UI and go back to first page
+              setState(() {
+                _currentPage = 0;
+                _pageController.jumpToPage(0);
+              });
+            },
+            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showPartnerManagementDialog() {
     showDialog(
       context: context,
@@ -624,13 +770,40 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         return ListTile(
                           title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
                           subtitle: Text("ID: ${pid.substring(0, 8)}..."),
-                          onTap: () {},
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Edit nickname button
+                              IconButton(
+                                icon: const Icon(Icons.edit, size: 20),
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  _showEditPartnerDialog(pid, name);
+                                },
+                              ),
+                              // Delete button
+                              IconButton(
+                                icon: const Icon(Icons.delete, size: 20, color: Colors.red),
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  _showDeletePartnerDialog(pid, name);
+                                },
+                              ),
+                            ],
+                          ),
+                          onTap: () {
+                            Navigator.pop(context);
+                            _showEditPartnerDialog(pid, name);
+                          },
                         );
                       },
                     ),
                   const SizedBox(height: 16),
+                  // Only show add form if less than 2 partners
                   if (_partnerIds.length < 2) ...[
                     const Divider(),
+                    const Text("Add New Partner", style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
                     TextField(
                       controller: idController,
                       decoration: const InputDecoration(
@@ -668,6 +841,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
                             // Reload partners
                             await _loadPartners();
+                            _syncToWidget();
                             
                             setDialogState(() {
                               idController.clear();
@@ -682,8 +856,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       },
                       child: const Text('Add Partner', style: TextStyle(color: Colors.white)),
                     ),
-                  ] else
-                    const Text("Max 3 partners reached.", style: TextStyle(color: AppColors.terracotta, fontSize: 12)),
+                  ],
                 ],
               ),
             ),
@@ -733,13 +906,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
         return Column(
           children: [
-            // Progress Header
-            ProgressHeader(
-              title: title,
-              subtitle: subtitle,
-              progress: progress,
-              accentColor: accentColor,
-              icon: icon,
+            // Progress Header (tappable on partner pages)
+            GestureDetector(
+              onTap: isPartnerPage && partnerId != null ? () {
+                final name = _partnerNames[partnerId] ?? "Partner";
+                _showEditPartnerDialog(partnerId, name);
+              } : null,
+              child: ProgressHeader(
+                title: title,
+                subtitle: subtitle,
+                progress: progress,
+                accentColor: accentColor,
+                icon: icon,
+              ),
             ),
             
             // Task List

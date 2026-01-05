@@ -17,6 +17,7 @@ class Task {
 
   // Confirmation
   final bool isConfirmed;
+  final DateTime? confirmedAt;
 
   Task({
     required this.id,
@@ -29,6 +30,7 @@ class Task {
     this.scheduledResetAt,
     this.targetPartnerId,
     this.isConfirmed = false,
+    this.confirmedAt,
   });
 
   // Create a copy with updated fields
@@ -41,6 +43,7 @@ class Task {
     DateTime? scheduledResetAt,
     String? targetPartnerId,
     bool? isConfirmed,
+    DateTime? confirmedAt,
   }) {
     return Task(
       id: this.id,
@@ -53,6 +56,7 @@ class Task {
       scheduledResetAt: scheduledResetAt ?? this.scheduledResetAt,
       targetPartnerId: targetPartnerId ?? this.targetPartnerId,
       isConfirmed: isConfirmed ?? this.isConfirmed,
+      confirmedAt: confirmedAt ?? this.confirmedAt,
     );
   }
 
@@ -69,6 +73,7 @@ class Task {
       'scheduled_reset_at': scheduledResetAt?.toIso8601String(),
       'target_partner_id': targetPartnerId,
       'is_confirmed': isConfirmed,
+      'confirmed_at': confirmedAt?.toIso8601String(),
     };
   }
 
@@ -85,6 +90,7 @@ class Task {
       scheduledResetAt: json['scheduled_reset_at'] != null ? DateTime.parse(json['scheduled_reset_at']) : null,
       targetPartnerId: json['target_partner_id'],
       isConfirmed: json['is_confirmed'] ?? false,
+      confirmedAt: json['confirmed_at'] != null ? DateTime.parse(json['confirmed_at']) : null,
     );
   }
 }

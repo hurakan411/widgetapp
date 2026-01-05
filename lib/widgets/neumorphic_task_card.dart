@@ -106,7 +106,17 @@ class NeumorphicTaskCard extends StatelessWidget {
                         ],
                       ),
                     ),
-                  if (task.isConfirmed)
+                  if (task.isConfirmed && task.confirmedAt != null)
+                     Text(
+                      "CONFIRMED ${_formatDateTime(task.confirmedAt!)}",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: AppColors.mustardYellow,
+                        letterSpacing: 1.0,
+                      ),
+                    )
+                  else if (task.isConfirmed)
                      Text(
                       "CONFIRMED",
                       style: TextStyle(
@@ -118,7 +128,7 @@ class NeumorphicTaskCard extends StatelessWidget {
                     )
                   else if (task.isDone && task.doneAt != null)
                     Text(
-                      "DONE ${task.doneAt!.hour.toString().padLeft(2, '0')}:${task.doneAt!.minute.toString().padLeft(2, '0')}",
+                      "DONE ${_formatDateTime(task.doneAt!)}",
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
@@ -174,5 +184,18 @@ class NeumorphicTaskCard extends StatelessWidget {
         ),
       ),
     );
+  }
+  
+  String _formatDateTime(DateTime dt) {
+    final now = DateTime.now();
+    final local = dt.toLocal();
+    
+    // If same day, show only time
+    if (now.year == local.year && now.month == local.month && now.day == local.day) {
+      return "${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}";
+    }
+    
+    // Otherwise show date and time
+    return "${local.month}/${local.day} ${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}";
   }
 }

@@ -3,6 +3,66 @@ import SwiftUI
 import AppIntents
 import os.log
 
+// --- Token Refresher ---
+class TokenRefresher {
+    static func refreshAccessToken() async -> String? {
+        let logger = Logger(subsystem: "com.shashinoguchi.widgetTask", category: "TokenRefresh")
+        let suiteName = "group.com.shashinoguchi.widgetTask"
+        guard let userDefaults = UserDefaults(suiteName: suiteName),
+              let urlStr = userDefaults.string(forKey: "supabase_url"),
+              let anonKey = userDefaults.string(forKey: "supabase_anon_key"),
+              let refreshToken = userDefaults.string(forKey: "supabase_refresh_token") else {
+            logger.error("--- [Swift] Missing refresh token or credentials ---")
+            return nil
+        }
+        
+        guard let url = URL(string: "\(urlStr)/auth/v1/token?grant_type=refresh_token") else {
+            return nil
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue(anonKey, forHTTPHeaderField: "apikey")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body: [String: String] = ["refresh_token": refreshToken]
+        request.httpBody = try? JSONEncoder().encode(body)
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode == 200 {
+                // Parse response to get new access token
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let newAccessToken = json["access_token"] as? String,
+                   let newRefreshToken = json["refresh_token"] as? String {
+                    // Save new tokens
+                    userDefaults.set(newAccessToken, forKey: "supabase_access_token")
+                    userDefaults.set(newRefreshToken, forKey: "supabase_refresh_token")
+                    logger.info("--- [Swift] Token refreshed successfully ---")
+                    return newAccessToken
+                }
+            } else {
+                logger.error("--- [Swift] Token refresh failed ---")
+            }
+        } catch {
+            logger.error("--- [Swift] Token refresh error: \(error.localizedDescription) ---")
+        }
+        return nil
+    }
+    
+    static func getValidToken() async -> String? {
+        let suiteName = "group.com.shashinoguchi.widgetTask"
+        guard let userDefaults = UserDefaults(suiteName: suiteName),
+              let currentToken = userDefaults.string(forKey: "supabase_access_token") else {
+            return await refreshAccessToken()
+        }
+        
+        // Try to use current token first, if it fails we'll refresh
+        return currentToken
+    }
+}
+
 // --- Models ---
 struct Task: Codable, Identifiable {
     let id: String
@@ -16,6 +76,7 @@ struct Task: Codable, Identifiable {
     let scheduledResetAt: String?
     // Confirmation
     var isConfirmed: Bool?
+    var confirmedAt: String?
     
     // CodingKeys to handle both camelCase (app) and snake_case (Supabase)
     enum CodingKeys: String, CodingKey {
@@ -28,6 +89,7 @@ struct Task: Codable, Identifiable {
         case resetValue = "reset_value"
         case scheduledResetAt = "scheduled_reset_at"
         case isConfirmed = "is_confirmed"
+        case confirmedAt = "confirmed_at"
     }
     
     // Helper to check if task is effectively done
@@ -89,6 +151,9 @@ struct ToggleTaskIntent: AppIntent {
         let suiteName = "group.com.shashinoguchi.widgetTask"
         let userDefaults = UserDefaults(suiteName: suiteName)
         
+        // Save debug log immediately
+        userDefaults?.set("ToggleTaskIntent started for: \(taskId)", forKey: "widget_debug_log")
+        
         // Try to find and toggle task in both keys
         let keys = ["my_tasks_key", "partner_tasks_key_0", "partner_tasks_key_1"]
         
@@ -109,42 +174,41 @@ struct ToggleTaskIntent: AppIntent {
                         if tasks[index].id == taskId {
                             var updates: [String: Any] = [:]
                             
-                            // Check if task is Confirmed
+                            // Prepare update values without modifying tasks yet
                             let isConfirmed = tasks[index].isConfirmed ?? false
+                            var newIsDone = tasks[index].isDone
+                            var newIsConfirmed = tasks[index].isConfirmed
+                            var newDoneAt = tasks[index].doneAt
                             
                             if isConfirmed {
                                 if isMyTask {
                                     // --- My Confirmed Task -> Undone (reset everything) ---
-                                    tasks[index].isDone = false
-                                    tasks[index].isConfirmed = false
-                                    tasks[index].doneAt = nil
+                                    newIsDone = false
+                                    newIsConfirmed = false
+                                    newDoneAt = nil
                                     
                                     updates["is_done"] = false
                                     updates["is_confirmed"] = false
                                     updates["done_at"] = NSNull()
                                 } else {
                                     // --- Partner's Confirmed Task -> Done (just remove confirmation) ---
-                                    tasks[index].isConfirmed = false
+                                    newIsConfirmed = false
                                     updates["is_confirmed"] = false
-                                    // Keep isDone as true, don't change doneAt
                                 }
                                 
                             } else if isMyTask {
                                 // --- My Task (Not Confirmed): Toggle Done/Undone ---
                                 let currentIsDone = tasks[index].isDone
-                                let newState = !currentIsDone
+                                newIsDone = !currentIsDone
+                                newDoneAt = newIsDone ? ISO8601DateFormatter().string(from: Date()) : nil
                                 
-                                tasks[index].isDone = newState
-                                let doneAtStr = newState ? ISO8601DateFormatter().string(from: Date()) : nil
-                                tasks[index].doneAt = doneAtStr
-                                
-                                updates["is_done"] = newState
-                                updates["done_at"] = newState ? (doneAtStr as Any) : NSNull()
+                                updates["is_done"] = newIsDone
+                                updates["done_at"] = newIsDone ? (newDoneAt as Any) : NSNull()
                                 
                             } else {
                                 // --- Partner Task (Not Confirmed): Done -> Confirmed ---
                                 if tasks[index].isDone {
-                                    tasks[index].isConfirmed = true
+                                    newIsConfirmed = true
                                     updates["is_confirmed"] = true
                                 } else {
                                     // Partner hasn't finished yet. Do nothing.
@@ -152,40 +216,73 @@ struct ToggleTaskIntent: AppIntent {
                                 }
                             }
                             
-                            // --- Save Local ---
-                            if let newData = try? JSONEncoder().encode(tasks),
-                               let newJsonString = String(data: newData, encoding: .utf8) {
-                                userDefaults?.set(newJsonString, forKey: key)
-                            }
+                            // --- Sync to Supabase (PATCH) with auto-refresh ---
+                            var dbUpdateSuccess = false
                             
-                            // --- Sync to Supabase (PATCH) ---
                             if !updates.isEmpty,
                                let urlStr = userDefaults?.string(forKey: "supabase_url"),
                                let anonKey = userDefaults?.string(forKey: "supabase_anon_key"),
-                               let token = userDefaults?.string(forKey: "supabase_access_token"),
+                               var token = userDefaults?.string(forKey: "supabase_access_token"),
                                let url = URL(string: "\(urlStr)/rest/v1/tasks?id=eq.\(taskId)") {
                                 
-                                var request = URLRequest(url: url)
-                                request.httpMethod = "PATCH"
-                                request.addValue(anonKey, forHTTPHeaderField: "apikey")
-                                request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                                request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                                request.addValue("return=minimal", forHTTPHeaderField: "Prefer")
-                                
-                                do {
-                                    request.httpBody = try JSONSerialization.data(withJSONObject: updates)
-                                    logger.info("--- [Swift] Sending PATCH request to \(url.absoluteString) ---")
-                                    let (data, response) = try await URLSession.shared.data(for: request)
-                                    if let httpResponse = response as? HTTPURLResponse {
-                                        logger.info("--- [Swift] Response Status: \(httpResponse.statusCode) ---")
-                                        if httpResponse.statusCode >= 300 {
+                                // Try up to 2 times (original + retry after refresh)
+                                for attempt in 1...2 {
+                                    var request = URLRequest(url: url)
+                                    request.httpMethod = "PATCH"
+                                    request.addValue(anonKey, forHTTPHeaderField: "apikey")
+                                    request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                                    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+                                    request.addValue("return=minimal", forHTTPHeaderField: "Prefer")
+                                    
+                                    do {
+                                        request.httpBody = try JSONSerialization.data(withJSONObject: updates)
+                                        logger.info("--- [Swift] Sending PATCH request (attempt \(attempt)) ---")
+                                        userDefaults?.set("Sending PATCH to \(taskId) (attempt \(attempt))...", forKey: "widget_debug_log")
+                                        
+                                        let (data, response) = try await URLSession.shared.data(for: request)
+                                        if let httpResponse = response as? HTTPURLResponse {
+                                            logger.info("--- [Swift] Response Status: \(httpResponse.statusCode) ---")
+                                            
+                                            if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                                                dbUpdateSuccess = true
+                                                userDefaults?.set("SUCCESS: PATCH \(taskId) -> \(httpResponse.statusCode)", forKey: "widget_debug_log")
+                                                break // Success, exit loop
+                                            } else if httpResponse.statusCode == 401 && attempt == 1 {
+                                                // Token expired, try to refresh
+                                                logger.info("--- [Swift] Token expired, refreshing... ---")
+                                                if let newToken = await TokenRefresher.refreshAccessToken() {
+                                                    token = newToken
+                                                    continue // Retry with new token
+                                                }
+                                            }
+                                            
                                             let bodyStr = String(data: data, encoding: .utf8) ?? "No Body"
                                             logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode), Body: \(bodyStr) ---")
+                                            userDefaults?.set("ERROR: \(httpResponse.statusCode) - \(bodyStr)", forKey: "widget_debug_log")
                                         }
+                                    } catch {
+                                        logger.error("--- [Swift] Network Error: \(error.localizedDescription) ---")
+                                        userDefaults?.set("NETWORK ERROR: \(error.localizedDescription)", forKey: "widget_debug_log")
                                     }
-                                } catch {
-                                    logger.error("--- [Swift] Network Error: \(error.localizedDescription) ---")
+                                    break // Exit on error (unless it's 401 on first attempt)
                                 }
+                            } else {
+                                userDefaults?.set("ERROR: Missing credentials or URL", forKey: "widget_debug_log")
+                            }
+                            
+                            // --- Apply changes and save locally ONLY if DB update succeeded ---
+                            if dbUpdateSuccess {
+                                tasks[index].isDone = newIsDone
+                                tasks[index].isConfirmed = newIsConfirmed
+                                tasks[index].doneAt = newDoneAt
+                                
+                                if let newData = try? JSONEncoder().encode(tasks),
+                                   let newJsonString = String(data: newData, encoding: .utf8) {
+                                    userDefaults?.set(newJsonString, forKey: key)
+                                    logger.info("--- [Swift] Saved local changes ---")
+                                }
+                            } else {
+                                logger.error("--- [Swift] DB update failed, not saving locally ---")
                             }
                             
                             // Reload timeline
@@ -266,25 +363,44 @@ struct RefreshIntent: AppIntent {
         request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+        // Try up to 2 times (original + retry after token refresh)
+        var currentToken = token
+        for attempt in 1...2 {
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.addValue(anonKey, forHTTPHeaderField: "apikey")
+            req.addValue("Bearer \(currentToken)", forHTTPHeaderField: "Authorization")
+            req.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
-            if let httpResponse = response as? HTTPURLResponse {
-                logger.info("--- [Swift] Refresh Response Status: \(httpResponse.statusCode) ---")
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
                 
-                if httpResponse.statusCode == 200 {
-                    // Save raw JSON string directly (no re-encoding)
-                    if let jsonString = String(data: data, encoding: .utf8) {
-                        userDefaults?.set(jsonString, forKey: key)
-                        logger.info("--- [Swift] Saved raw JSON to \(key) ---")
+                if let httpResponse = response as? HTTPURLResponse {
+                    logger.info("--- [Swift] Refresh Response Status: \(httpResponse.statusCode) (attempt \(attempt)) ---")
+                    
+                    if httpResponse.statusCode == 200 {
+                        // Save raw JSON string directly (no re-encoding)
+                        if let jsonString = String(data: data, encoding: .utf8) {
+                            userDefaults?.set(jsonString, forKey: key)
+                            logger.info("--- [Swift] Saved raw JSON to \(key), length: \(jsonString.count) ---")
+                        }
+                        break // Success, exit loop
+                    } else if httpResponse.statusCode == 401 && attempt == 1 {
+                        // Token expired, try to refresh
+                        logger.info("--- [Swift] Token expired, refreshing... ---")
+                        if let newToken = await TokenRefresher.refreshAccessToken() {
+                            currentToken = newToken
+                            continue // Retry with new token
+                        }
                     }
-                } else {
+                    
                     let bodyStr = String(data: data, encoding: .utf8) ?? "No Body"
                     logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode), Body: \(bodyStr) ---")
                 }
+            } catch {
+                logger.error("--- [Swift] Refresh Network Error: \(error.localizedDescription) ---")
             }
-        } catch {
-            logger.error("--- [Swift] Refresh Network Error: \(error.localizedDescription) ---")
+            break // Exit on error (unless 401 on first attempt)
         }
         
         // Reload timeline
@@ -446,12 +562,26 @@ struct TaskCardView: View {
                     // Status Text (Big)
                     Group {
                         if isConfirmed {
-                            Text("CONFIRMED")
-                                .font(.system(size: 20, weight: .black, design: .rounded)) // Slightly smaller to fit
-                                .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
-                                .tracking(1.0)
-                                .minimumScaleFactor(0.5)
-                                .lineLimit(1)
+                            if let confirmedAtStr = task.confirmedAt, let timeStr = formatDoneTime(confirmedAtStr) {
+                                HStack(alignment: .lastTextBaseline, spacing: 4) {
+                                    Text("CONFIRMED")
+                                        .font(.system(size: 16, weight: .black, design: .rounded))
+                                        .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                                        .tracking(1.0)
+                                        .minimumScaleFactor(0.5)
+                                    Text(timeStr)
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29).opacity(0.7))
+                                        .contentTransition(.numericText())
+                                }
+                            } else {
+                                Text("CONFIRMED")
+                                    .font(.system(size: 20, weight: .black, design: .rounded))
+                                    .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                                    .tracking(1.0)
+                                    .minimumScaleFactor(0.5)
+                                    .lineLimit(1)
+                            }
                         } else if isDone {
                             if let doneAtStr = task.doneAt, let timeStr = formatDoneTime(doneAtStr) {
                                 HStack(alignment: .lastTextBaseline, spacing: 4) {
@@ -523,27 +653,38 @@ struct MessageWidgetEntryView : View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            HStack {
+            HStack(spacing: 6) {
+                // Icon (left of name)
+                Image(systemName: entry.mode == .me ? "person.fill" : "heart.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                
                 Text(headerText(for: entry.mode))
                     .font(.system(size: 12, weight: .black, design: .rounded))
                     .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.6))
                     .tracking(1.5)
                     .lineLimit(1)
+                
                 Spacer()
                 
-                // Refresh Button
+                // Refresh Button (Neumorphic)
                 if #available(iOS 17.0, *) {
                     Button(intent: RefreshIntent(mode: entry.mode)) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.caption)
-                            .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.5))
+                        ZStack {
+                            // Neumorphic background
+                            Circle()
+                                .fill(Color(red: 0.88, green: 0.90, blue: 0.93))
+                                .shadow(color: .white.opacity(0.8), radius: 2, x: -2, y: -2)
+                                .shadow(color: Color(red: 0.68, green: 0.70, blue: 0.75).opacity(0.5), radius: 2, x: 2, y: 2)
+                            
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.6))
+                        }
+                        .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
                 }
-                
-                Image(systemName: entry.mode == .me ? "person.fill" : "heart.fill")
-                    .font(.caption2)
-                    .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
             }
             .padding(.bottom, 8)
             .padding(.horizontal, 4)

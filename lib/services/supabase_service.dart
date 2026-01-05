@@ -122,16 +122,23 @@ class SupabaseService {
   }
 
   Future<void> confirmTask(String taskId) async {
-    // When confirmed by partner, mark as confirmed
-    await _client.from('tasks').update({
-      'is_confirmed': true,
-    }).eq('id', taskId);
+    // When confirmed by partner, mark as confirmed with timestamp
+    try {
+      await _client.from('tasks').update({
+        'is_confirmed': true,
+        'confirmed_at': DateTime.now().toUtc().toIso8601String(),
+      }).eq('id', taskId);
+      print('[confirmTask] Success for $taskId');
+    } catch (e) {
+      print('[confirmTask] Error: $e');
+    }
   }
 
   Future<void> unconfirmTask(String taskId) async {
     // Remove confirmation but keep task as done
     await _client.from('tasks').update({
       'is_confirmed': false,
+      'confirmed_at': null,
     }).eq('id', taskId);
   }
 
@@ -145,6 +152,7 @@ class SupabaseService {
       createdAt: DateTime.parse(json['created_at']),
       targetPartnerId: json['target_partner_id'],
       isConfirmed: json['is_confirmed'] ?? false,
+      confirmedAt: json['confirmed_at'] != null ? DateTime.parse(json['confirmed_at']) : null,
       resetType: _parseResetType(json['reset_type']),
       resetValue: json['reset_value'],
     );
@@ -176,6 +184,27 @@ class SupabaseService {
     });
   }
 
+  Future<void> removePartner(String partnerId) async {
+    final user = currentUser;
+    if (user == null) {
+      print('[removePartner] No user logged in');
+      return;
+    }
+
+    print('[removePartner] Removing partner: $partnerId for user: ${user.id}');
+    
+    try {
+      await _client
+          .from('partners')
+          .delete()
+          .eq('user_id', user.id)
+          .eq('partner_id', partnerId);
+      print('[removePartner] Delete successful');
+    } catch (e) {
+      print('[removePartner] Error: $e');
+    }
+  }
+
   Future<List<String>> getPartnerIds() async {
     final user = currentUser;
     if (user == null) return [];
@@ -185,7 +214,9 @@ class SupabaseService {
         .select('partner_id')
         .eq('user_id', user.id);
     
-    return (response as List).map((e) => e['partner_id'] as String).toList();
+    final ids = (response as List).map((e) => e['partner_id'] as String).toList();
+    print('[getPartnerIds] Found ${ids.length} partners: $ids');
+    return ids;
   }
 
   Future<void> checkAndResetDailyTasks() async {
