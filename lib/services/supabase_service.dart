@@ -106,7 +106,7 @@ class SupabaseService {
   Future<void> toggleTask(String taskId, bool isDone) async {
     await _client.from('tasks').update({
       'is_done': isDone,
-      'done_at': isDone ? DateTime.now().toIso8601String() : null,
+      'done_at': isDone ? DateTime.now().toUtc().toIso8601String() : null,
     }).eq('id', taskId);
   }
 

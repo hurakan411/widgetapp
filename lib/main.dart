@@ -636,14 +636,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: AppColors.background,
-        title: const Text('Edit Partner', style: TextStyle(color: AppColors.textPrimary)),
+        title: const Text('パートナーを編集', style: TextStyle(color: AppColors.textPrimary)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: idController,
               decoration: const InputDecoration(
-                labelText: 'Partner ID',
+                labelText: 'パートナーID',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -651,7 +651,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             TextField(
               controller: nameController,
               decoration: const InputDecoration(
-                labelText: 'Nickname',
+                labelText: 'ニックネーム',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -664,11 +664,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               Navigator.pop(context);
               _showDeletePartnerDialog(partnerId, currentName);
             },
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            child: const Text('削除', style: TextStyle(color: Colors.red)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: const Text('キャンセル'),
           ),
           ElevatedButton(
             onPressed: () async {
@@ -695,7 +695,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               _syncToWidget();
               Navigator.pop(context);
             },
-            child: const Text('Save'),
+            child: const Text('保存'),
           ),
         ],
       ),
@@ -707,15 +707,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: AppColors.background,
-        title: const Text('Delete Partner', style: TextStyle(color: AppColors.textPrimary)),
-        content: Text(
-          'Are you sure you want to remove "$partnerName" from your partners?\n\nThis will not delete their tasks.',
+        title: const Text('パートナーを削除', style: TextStyle(color: AppColors.textPrimary)),
+          content: Text(
+          '"$partnerName" をパートナーから削除してもよろしいですか？\n\n相手のタスクは削除されません。',
           style: const TextStyle(color: AppColors.textSecondary),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: const Text('キャンセル'),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
@@ -732,7 +732,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 _pageController.jumpToPage(0);
               });
             },
-            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+            child: const Text('削除', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
