@@ -216,6 +216,17 @@ struct ToggleTaskIntent: AppIntent {
                                 }
                             }
                             
+                            // --- Apply changes and save locally OPTIMISTICALLY ---
+                            tasks[index].isDone = newIsDone
+                            tasks[index].isConfirmed = newIsConfirmed
+                            tasks[index].doneAt = newDoneAt
+                            
+                            if let newData = try? JSONEncoder().encode(tasks),
+                               let newJsonString = String(data: newData, encoding: .utf8) {
+                                userDefaults?.set(newJsonString, forKey: key)
+                                logger.info("--- [Swift] Saved local changes (Optimistic) ---")
+                            }
+
                             // --- Sync to Supabase (PATCH) with auto-refresh ---
                             var dbUpdateSuccess = false
                             
@@ -270,19 +281,8 @@ struct ToggleTaskIntent: AppIntent {
                                 userDefaults?.set("ERROR: Missing credentials or URL", forKey: "widget_debug_log")
                             }
                             
-                            // --- Apply changes and save locally ONLY if DB update succeeded ---
-                            if dbUpdateSuccess {
-                                tasks[index].isDone = newIsDone
-                                tasks[index].isConfirmed = newIsConfirmed
-                                tasks[index].doneAt = newDoneAt
-                                
-                                if let newData = try? JSONEncoder().encode(tasks),
-                                   let newJsonString = String(data: newData, encoding: .utf8) {
-                                    userDefaults?.set(newJsonString, forKey: key)
-                                    logger.info("--- [Swift] Saved local changes ---")
-                                }
-                            } else {
-                                logger.error("--- [Swift] DB update failed, not saving locally ---")
+                            if !dbUpdateSuccess {
+                                logger.error("--- [Swift] DB update failed, but local changes kept (Optimistic) ---")
                             }
                             
                             // Reload timeline
@@ -304,18 +304,32 @@ struct ToggleTaskIntent: AppIntent {
 struct RefreshIntent: AppIntent {
     static var title: LocalizedStringResource = "Refresh Tasks"
     
-    @Parameter(title: "Mode")
-    var mode: TaskMode
+    @Parameter(title: "Target")
+    var target: TaskTarget
     
-    init() {}
+    init() {
+        self.target = TaskTarget(id: "me", name: "My Tasks")
+    }
     
     init(mode: TaskMode) {
-        self.mode = mode
+        // Convert TaskMode to TaskTarget
+        switch mode {
+        case .me:
+            self.target = TaskTarget(id: "me", name: "My Tasks")
+        case .partner1:
+            self.target = TaskTarget(id: "partner1", name: "Partner 1")
+        case .partner2:
+            self.target = TaskTarget(id: "partner2", name: "Partner 2")
+        }
+    }
+    
+    init(target: TaskTarget) {
+        self.target = target
     }
     
     func perform() async throws -> some IntentResult {
         let logger = Logger(subsystem: "com.shashinoguchi.widgetTask", category: "Refresh")
-        logger.info("--- [Swift] RefreshIntent performed for mode: \(mode.rawValue) ---")
+        logger.info("--- [Swift] RefreshIntent performed for target: \(target.id) ---")
         
         let suiteName = "group.com.shashinoguchi.widgetTask"
         let userDefaults = UserDefaults(suiteName: suiteName)
@@ -328,24 +342,28 @@ struct RefreshIntent: AppIntent {
             return .result()
         }
         
-        // Determine which data to fetch based on mode
+        // Determine which data to fetch based on target
         let key: String
         let userId: String?
         
-        switch mode {
-        case .me:
+        switch target.id {
+        case "me":
             key = "my_tasks_key"
             userId = userDefaults?.string(forKey: "current_user_id")
-        case .partner1:
+        case "partner1":
             key = "partner_tasks_key_0"
             userId = userDefaults?.string(forKey: "partner_id_0")
-        case .partner2:
+        case "partner2":
             key = "partner_tasks_key_1"
             userId = userDefaults?.string(forKey: "partner_id_1")
+        default:
+            logger.error("--- [Swift] Unknown target ID: \(target.id) ---")
+            WidgetCenter.shared.reloadAllTimelines()
+            return .result()
         }
         
         guard let uid = userId, !uid.isEmpty else {
-            logger.error("--- [Swift] No user ID for mode \(mode.rawValue) ---")
+            logger.error("--- [Swift] No user ID for target \(target.id) ---")
             WidgetCenter.shared.reloadAllTimelines()
             return .result()
         }
@@ -353,9 +371,14 @@ struct RefreshIntent: AppIntent {
         // Fetch data from Supabase
         guard let url = URL(string: "\(urlStr)/rest/v1/tasks?user_id=eq.\(uid)&order=created_at") else {
             logger.error("--- [Swift] Invalid URL ---")
+            userDefaults?.set("ERROR: Invalid URL", forKey: "widget_debug_log")
             WidgetCenter.shared.reloadAllTimelines()
             return .result()
         }
+        
+        // Backup existing data before attempting refresh
+        let existingData = userDefaults?.string(forKey: key)
+        var fetchSucceeded = false
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -382,7 +405,9 @@ struct RefreshIntent: AppIntent {
                         // Save raw JSON string directly (no re-encoding)
                         if let jsonString = String(data: data, encoding: .utf8) {
                             userDefaults?.set(jsonString, forKey: key)
+                            userDefaults?.set("SUCCESS: Refreshed \(key)", forKey: "widget_debug_log")
                             logger.info("--- [Swift] Saved raw JSON to \(key), length: \(jsonString.count) ---")
+                            fetchSucceeded = true
                         }
                         break // Success, exit loop
                     } else if httpResponse.statusCode == 401 && attempt == 1 {
@@ -396,11 +421,19 @@ struct RefreshIntent: AppIntent {
                     
                     let bodyStr = String(data: data, encoding: .utf8) ?? "No Body"
                     logger.error("--- [Swift] Supabase Error: \(httpResponse.statusCode), Body: \(bodyStr) ---")
+                    userDefaults?.set("ERROR: HTTP \(httpResponse.statusCode)", forKey: "widget_debug_log")
                 }
             } catch {
                 logger.error("--- [Swift] Refresh Network Error: \(error.localizedDescription) ---")
+                userDefaults?.set("ERROR: \(error.localizedDescription)", forKey: "widget_debug_log")
             }
             break // Exit on error (unless 401 on first attempt)
+        }
+        
+        // If fetch failed and we have existing data, restore it (ensure it's not lost)
+        if !fetchSucceeded, let backup = existingData {
+            userDefaults?.set(backup, forKey: key)
+            logger.info("--- [Swift] Refresh failed, preserved existing data ---")
         }
         
         // Reload timeline
@@ -415,22 +448,68 @@ struct SelectTaskModeIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Select Task Mode"
     static var description: IntentDescription = IntentDescription("Choose whose tasks to display.")
     
-    @Parameter(title: "Mode", default: .me)
-    var mode: TaskMode
+    @Parameter(title: "Mode")
+    var target: TaskTarget
+    
+    init() {
+        self.target = TaskTarget(id: "me", name: "My Tasks")
+    }
+    
+    init(target: TaskTarget) {
+        self.target = target
+    }
 }
 
 @available(iOS 17.0, *)
-enum TaskMode: String, AppEnum {
+enum TaskMode: String { // Removed AppEnum conformance as it's no longer used directly in Intent
     case me
     case partner1
     case partner2
+}
+
+@available(iOS 16.0, *)
+struct TaskTarget: AppEntity {
+    let id: String
+    let name: String
     
-    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Task Mode"
-    static var caseDisplayRepresentations: [TaskMode : DisplayRepresentation] = [
-        .me: "My Tasks",
-        .partner1: "Partner 1",
-        .partner2: "Partner 2"
-    ]
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Display Target"
+    static var defaultQuery = TaskTargetQuery()
+        
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "\(name)")
+    }
+}
+
+@available(iOS 16.0, *)
+struct TaskTargetQuery: EntityQuery {
+    func entities(for identifiers: [String]) async throws -> [TaskTarget] {
+        return try await suggestedEntities().filter { identifiers.contains($0.id) }
+    }
+    
+    func suggestedEntities() async throws -> [TaskTarget] {
+        let defaults = UserDefaults(suiteName: "group.com.shashinoguchi.widgetTask")
+        var targets: [TaskTarget] = []
+        
+        targets.append(TaskTarget(id: "me", name: "My Tasks"))
+        
+        // Partner 1
+        if let _ = defaults?.string(forKey: "partner_id_0") {
+             let name = defaults?.string(forKey: "partner_name_0") ?? "Partner 1"
+             targets.append(TaskTarget(id: "partner1", name: name))
+        }
+        
+        // Partner 2
+        if let _ = defaults?.string(forKey: "partner_id_1") {
+             let name = defaults?.string(forKey: "partner_name_1") ?? "Partner 2"
+             targets.append(TaskTarget(id: "partner2", name: name))
+        }
+        
+        return targets
+    }
+    
+    func defaultResult() async -> TaskTarget? {
+        return TaskTarget(id: "me", name: "My Tasks")
+    }
 }
 
 // --- Provider ---
@@ -444,17 +523,24 @@ struct Provider: AppIntentTimelineProvider {
     func snapshot(for configuration: SelectTaskModeIntent, in context: Context) async -> SimpleEntry {
         SimpleEntry(date: Date(), tasks: [
             Task(id: "1", title: "Sample Task", isDone: false, doneAt: nil, createdAt: "", resetType: nil, resetValue: nil, scheduledResetAt: nil)
-        ], mode: configuration.mode, partnerName: nil)
+        ], mode: TaskMode(rawValue: configuration.target.id) ?? .me, partnerName: nil)
     }
     
     func timeline(for configuration: SelectTaskModeIntent, in context: Context) async -> Timeline<SimpleEntry> {
-        logger.info("--- [Swift] getTimeline Start (Mode: \(configuration.mode.rawValue)) ---")
+        logger.info("--- [Swift] getTimeline Start (Target: \(configuration.target.id)) ---")
         
         let suiteName = "group.com.shashinoguchi.widgetTask"
         let userDefaults = UserDefaults(suiteName: suiteName)
         
-        // Use configuration.mode directly to allow independent widgets
-        let mode = configuration.mode
+        // Use configuration.target directly to allow independent widgets
+        let targetId = configuration.target.id
+        let mode: TaskMode
+        
+        switch targetId {
+        case "partner1": mode = .partner1
+        case "partner2": mode = .partner2
+        default: mode = .me
+        }
         
         // Select key based on mode
         let key: String
@@ -466,10 +552,10 @@ struct Provider: AppIntentTimelineProvider {
             nameKey = nil
         case .partner1:
             key = "partner_tasks_key_0"
-            nameKey = "partner_name_key_0"
+            nameKey = "partner_name_0"
         case .partner2:
             key = "partner_tasks_key_1"
-            nameKey = "partner_name_key_1"
+            nameKey = "partner_name_1"
         }
         
         var tasks: [Task] = []
@@ -504,6 +590,7 @@ struct SimpleEntry: TimelineEntry {
 // --- Views ---
 struct TaskCardView: View {
     let task: Task
+    let family: WidgetFamily
     
     // Retro Pop Colors
     let doneColor = Color(red: 0.89, green: 0.69, blue: 0.29) // Mustard Yellow
@@ -525,30 +612,34 @@ struct TaskCardView: View {
                 } else if isDone {
                     // Done State (Concave / Pressed)
                     doneColor
-                    // Inner Shadow Simulation (Top-Left Dark, Bottom-Right Light for Inset)
-                    LinearGradient(
-                        gradient: Gradient(colors: [.black.opacity(0.15), .clear]),
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    .mask(
-                        RoundedRectangle(cornerRadius: 16)
-                            .strokeBorder(lineWidth: 4)
-                            .blur(radius: 4)
-                    )
+                    // Inner Shadow Simulation (only for non-small widgets)
+                    if family != .systemSmall {
+                        LinearGradient(
+                            gradient: Gradient(colors: [.black.opacity(0.15), .clear]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .mask(
+                            RoundedRectangle(cornerRadius: 16)
+                                .strokeBorder(lineWidth: 4)
+                                .blur(radius: 4)
+                        )
+                    }
                 } else {
                     // Undone State (Convex / Unpressed)
                     baseColor
-                    // Light Source (Top-Left)
-                    LinearGradient(
-                        gradient: Gradient(colors: [.white.opacity(0.8), .clear]),
-                        startPoint: .topLeading,
-                        endPoint: .center
-                    )
+                    // Light Source (only for non-small widgets)
+                    if family != .systemSmall {
+                        LinearGradient(
+                            gradient: Gradient(colors: [.white.opacity(0.8), .clear]),
+                            startPoint: .topLeading,
+                            endPoint: .center
+                        )
+                    }
                 }
                 
                 // Content
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     // Title
                     Text(task.title)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -559,68 +650,54 @@ struct TaskCardView: View {
                     
                     Spacer()
                     
-                    // Status Text (Big)
-                    Group {
+                    // Status Text (Big) and Time (Vertical layout)
+                    VStack(alignment: .leading, spacing: 1) {
                         if isConfirmed {
+                            Text("CONFIRMED")
+                                .font(.system(size: 36, weight: .black, design: .rounded))
+                                .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                                .tracking(1.0)
+                                .minimumScaleFactor(0.5)
+                                .lineLimit(1)
                             if let confirmedAtStr = task.confirmedAt, let timeStr = formatDoneTime(confirmedAtStr) {
-                                HStack(alignment: .lastTextBaseline, spacing: 4) {
-                                    Text("CONFIRMED")
-                                        .font(.system(size: 16, weight: .black, design: .rounded))
-                                        .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
-                                        .tracking(1.0)
-                                        .minimumScaleFactor(0.5)
-                                    Text(timeStr)
-                                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                                        .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29).opacity(0.7))
-                                        .contentTransition(.numericText())
-                                }
-                            } else {
-                                Text("CONFIRMED")
-                                    .font(.system(size: 20, weight: .black, design: .rounded))
-                                    .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
-                                    .tracking(1.0)
-                                    .minimumScaleFactor(0.5)
-                                    .lineLimit(1)
+                                Text(timeStr)
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29).opacity(0.7))
+                                    .contentTransition(.numericText())
                             }
                         } else if isDone {
+                            Text("DONE")
+                                .font(.system(size: 42, weight: .black, design: .rounded))
+                                .foregroundColor(.white.opacity(0.9))
+                                .tracking(1.0)
+                                .minimumScaleFactor(0.5)
+                                .lineLimit(1)
                             if let doneAtStr = task.doneAt, let timeStr = formatDoneTime(doneAtStr) {
-                                HStack(alignment: .lastTextBaseline, spacing: 4) {
-                                    Text("DONE")
-                                        .font(.system(size: 24, weight: .black, design: .rounded))
-                                        .foregroundColor(.white.opacity(0.9))
-                                        .tracking(1.0)
-                                        .minimumScaleFactor(0.5)
-                                    Text(timeStr)
-                                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                                        .foregroundColor(.white.opacity(0.7))
-                                        .contentTransition(.numericText())
-                                }
-                            } else {
-                                 Text("DONE")
-                                    .font(.system(size: 24, weight: .black, design: .rounded))
-                                    .foregroundColor(.white.opacity(0.9))
-                                    .tracking(1.0)
-                                    .minimumScaleFactor(0.5)
+                                Text(timeStr)
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.7))
+                                    .contentTransition(.numericText())
                             }
                         } else {
                             Text("UNDONE")
-                                .font(.system(size: 24, weight: .black, design: .rounded))
+                                .font(.system(size: 42, weight: .black, design: .rounded))
                                 .foregroundColor(textColor.opacity(0.3))
                                 .tracking(1.0)
                                 .minimumScaleFactor(0.5)
+                                .lineLimit(1)
                         }
                     }
                     .id(isConfirmed ? "confirmed" : (isDone ? "done" : "undone"))
                     .transition(.push(from: .bottom))
                     .animation(.snappy, value: isDone)
                 }
-                .padding(12)
+                .padding(10)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: isDone ? .clear : .black.opacity(0.15), radius: 3, x: 3, y: 3)
-        .shadow(color: isDone ? .clear : .white.opacity(0.9), radius: 3, x: -2, y: -2)
+        .shadow(color: family == .systemSmall ? .clear : (isDone ? .clear : .black.opacity(0.15)), radius: 3, x: 3, y: 3)
+        .shadow(color: family == .systemSmall ? .clear : (isDone ? .clear : .white.opacity(0.9)), radius: 3, x: -2, y: -2)
     }
     
     func formatDoneTime(_ dateStr: String) -> String? {
@@ -651,45 +728,95 @@ struct MessageWidgetEntryView : View {
     @Environment(\.widgetFamily) var family
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack(spacing: 6) {
-                // Icon (left of name)
-                Image(systemName: entry.mode == .me ? "person.fill" : "heart.fill")
-                    .font(.system(size: 11))
-                    .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
-                
-                Text(headerText(for: entry.mode))
-                    .font(.system(size: 12, weight: .black, design: .rounded))
-                    .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.6))
-                    .tracking(1.5)
-                    .lineLimit(1)
-                
-                Spacer()
-                
-                // Refresh Button (Neumorphic)
-                if #available(iOS 17.0, *) {
-                    Button(intent: RefreshIntent(mode: entry.mode)) {
-                        ZStack {
-                            // Neumorphic background
-                            Circle()
-                                .fill(Color(red: 0.88, green: 0.90, blue: 0.93))
-                                .shadow(color: .white.opacity(0.8), radius: 2, x: -2, y: -2)
-                                .shadow(color: Color(red: 0.68, green: 0.70, blue: 0.75).opacity(0.5), radius: 2, x: 2, y: 2)
-                            
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.6))
+        if family == .systemSmall {
+            // Small widget: Full widget as task display
+            smallWidgetView
+        } else {
+            // Medium/Large widgets: Header + Cards
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .top, spacing: 6) {
+                    // Icon (left of name)
+                    Image(systemName: entry.mode == .me ? "person.fill" : "heart.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                    
+                    Text(headerText(for: entry.mode))
+                        .font(.system(size: 12, weight: .black, design: .rounded))
+                        .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.6))
+                        .tracking(1.5)
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    // Refresh Button (Neumorphic Capsule)
+                    if #available(iOS 17.0, *) {
+                        Button(intent: RefreshIntent(mode: entry.mode)) {
+                            ZStack {
+                                // Neumorphic background
+                                Capsule()
+                                    .fill(Color(red: 0.88, green: 0.90, blue: 0.93))
+                                    .shadow(color: .white.opacity(0.8), radius: 2, x: -2, y: -2)
+                                    .shadow(color: Color(red: 0.68, green: 0.70, blue: 0.75).opacity(0.5), radius: 2, x: 2, y: 2)
+                                
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(Color(red: 0.17, green: 0.24, blue: 0.31).opacity(0.6))
+                            }
+                            .frame(width: 44, height: 22)
                         }
-                        .frame(width: 28, height: 28)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(.bottom, 2)
+                .padding(.horizontal, 2)
+                
+                if entry.tasks.isEmpty {
+                    VStack {
+                        Image(systemName: "list.bullet.clipboard")
+                            .font(.largeTitle)
+                            .foregroundColor(.gray.opacity(0.3))
+                        Text("No tasks")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundColor(.gray)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    TaskGridView(tasks: entry.tasks, family: family, isMyTask: entry.mode == .me, mode: entry.mode)
                 }
             }
-            .padding(.bottom, 8)
-            .padding(.horizontal, 4)
-            
-            if entry.tasks.isEmpty {
+            .padding(2)
+            .containerBackground(for: .widget) {
+                Color(red: 0.88, green: 0.90, blue: 0.93)
+            }
+        }
+    }
+    
+    var smallWidgetView: some View {
+        let task = entry.tasks.filter { $0.isVisible }.first ?? entry.tasks.first
+        let isDone = task?.isEffectivelyDone ?? false
+        let isConfirmed = task?.isConfirmed ?? false
+        let textColor = Color(red: 0.17, green: 0.24, blue: 0.31)
+        let backgroundColor: Color = {
+            if isConfirmed {
+                return Color(red: 0.89, green: 0.69, blue: 0.29).opacity(0.3)
+            } else if isDone {
+                return Color(red: 0.89, green: 0.69, blue: 0.29) // Mustard Yellow
+            } else {
+                return Color(red: 0.88, green: 0.90, blue: 0.93) // Base Gray
+            }
+        }()
+        
+        return Group {
+            if let task = task {
+                if #available(iOS 17.0, *) {
+                    Button(intent: ToggleTaskIntent(taskId: task.id, isMyTask: entry.mode == .me)) {
+                        smallTaskContent(task: task, isDone: isDone, isConfirmed: isConfirmed, textColor: textColor)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    smallTaskContent(task: task, isDone: isDone, isConfirmed: isConfirmed, textColor: textColor)
+                }
+            } else {
                 VStack {
                     Image(systemName: "list.bullet.clipboard")
                         .font(.largeTitle)
@@ -699,14 +826,84 @@ struct MessageWidgetEntryView : View {
                         .foregroundColor(.gray)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                TaskGridView(tasks: entry.tasks, family: family, isMyTask: entry.mode == .me, mode: entry.mode)
             }
         }
-        .padding(8)
         .containerBackground(for: .widget) {
-            Color(red: 0.88, green: 0.90, blue: 0.93)
+            backgroundColor
         }
+    }
+    
+    func smallTaskContent(task: Task, isDone: Bool, isConfirmed: Bool, textColor: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            // Title
+            Text(task.title)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundColor(isDone ? .white : textColor)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            
+            Spacer()
+            
+            // Status Text (Big) and Time (Vertical layout)
+            VStack(alignment: .leading, spacing: 1) {
+                if isConfirmed {
+                    Text("CONFIRMED")
+                        .font(.system(size: 36, weight: .black, design: .rounded))
+                        .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29))
+                        .tracking(1.0)
+                        .minimumScaleFactor(0.5)
+                        .lineLimit(1)
+                    if let confirmedAtStr = task.confirmedAt, let timeStr = formatDoneTime(confirmedAtStr) {
+                        Text(timeStr)
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundColor(Color(red: 0.89, green: 0.69, blue: 0.29).opacity(0.7))
+                    }
+                } else if isDone {
+                    Text("DONE")
+                        .font(.system(size: 42, weight: .black, design: .rounded))
+                        .foregroundColor(.white.opacity(0.9))
+                        .tracking(1.0)
+                        .minimumScaleFactor(0.5)
+                        .lineLimit(1)
+                    if let doneAtStr = task.doneAt, let timeStr = formatDoneTime(doneAtStr) {
+                        Text(timeStr)
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                } else {
+                    Text("UNDONE")
+                        .font(.system(size: 42, weight: .black, design: .rounded))
+                        .foregroundColor(textColor.opacity(0.3))
+                        .tracking(1.0)
+                        .minimumScaleFactor(0.5)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+    
+    func formatDoneTime(_ dateStr: String) -> String? {
+        let isoFormatter = ISO8601DateFormatter()
+        
+        // Try with fractional seconds first
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: dateStr) {
+            let timeFormatter = DateFormatter()
+            timeFormatter.dateFormat = "HH:mm"
+            return timeFormatter.string(from: date)
+        }
+        
+        // Fallback: try without fractional seconds
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: dateStr) {
+            let timeFormatter = DateFormatter()
+            timeFormatter.dateFormat = "HH:mm"
+            return timeFormatter.string(from: date)
+        }
+        
+        return nil
     }
     
     func headerText(for mode: TaskMode) -> String {
@@ -736,7 +933,7 @@ struct TaskGridView: View {
     
     var body: some View {
         GeometryReader { geo in
-            let spacing: CGFloat = 8
+            let spacing: CGFloat = 2
             let config = layoutConfig
             let columns = config.columns
             let rows = config.rows
@@ -780,12 +977,12 @@ struct TaskGridView: View {
     func taskButton(for task: Task, width: CGFloat, height: CGFloat) -> some View {
         if #available(iOS 17.0, *) {
             Button(intent: ToggleTaskIntent(taskId: task.id, isMyTask: isMyTask)) {
-                TaskCardView(task: task)
+                TaskCardView(task: task, family: family)
             }
             .buttonStyle(.plain)
             .frame(width: width, height: height)
         } else {
-            TaskCardView(task: task)
+            TaskCardView(task: task, family: family)
                 .frame(width: width, height: height)
         }
     }

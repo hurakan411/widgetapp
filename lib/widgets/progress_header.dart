@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../constants/design.dart';
 
-class ProgressHeader extends StatelessWidget {
+import 'package:lottie/lottie.dart';
+
+class ProgressHeader extends StatefulWidget {
   final String title;
   final String subtitle;
   final double progress; // 0.0 to 1.0
@@ -18,9 +20,38 @@ class ProgressHeader extends StatelessWidget {
   }) : super(key: key);
 
   @override
+  State<ProgressHeader> createState() => _ProgressHeaderState();
+}
+
+class _ProgressHeaderState extends State<ProgressHeader> with SingleTickerProviderStateMixin {
+  late final AnimationController _lottieController;
+
+  @override
+  void initState() {
+    super.initState();
+    _lottieController = AnimationController(vsync: this, duration: const Duration(seconds: 2));
+    // Initialize to current progress
+    _lottieController.value = widget.progress;
+  }
+
+  @override
+  void didUpdateWidget(ProgressHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.progress != widget.progress) {
+      _lottieController.animateTo(widget.progress);
+    }
+  }
+
+  @override
+  void dispose() {
+    _lottieController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 32, vertical: 16), // Increased margin to be smaller than task cards
+      margin: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
       padding: const EdgeInsets.all(20),
       decoration: AppStyles.neumorphicConvex.copyWith(
         borderRadius: BorderRadius.circular(24),
@@ -56,7 +87,7 @@ class ProgressHeader extends StatelessWidget {
                 ),
                 // Animated Progress Indicator & Content
                 TweenAnimationBuilder<double>(
-                  tween: Tween<double>(begin: 0, end: progress),
+                  tween: Tween<double>(begin: 0, end: widget.progress),
                   duration: const Duration(milliseconds: 1000),
                   curve: Curves.easeOutExpo,
                   builder: (context, value, _) {
@@ -69,21 +100,21 @@ class ProgressHeader extends StatelessWidget {
                             value: value,
                             strokeWidth: 11,
                             backgroundColor: Colors.transparent,
-                            valueColor: AlwaysStoppedAnimation<Color>(accentColor),
+                            valueColor: AlwaysStoppedAnimation<Color>(widget.accentColor),
                             strokeCap: StrokeCap.round,
                           ),
                         ),
                         Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(icon, size: 28, color: accentColor.withOpacity(0.8)),
+                            Icon(widget.icon, size: 28, color: widget.accentColor.withOpacity(0.8)),
                             const SizedBox(height: 2),
                             Text(
                               "${(value * 100).toInt()}%",
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
-                                color: accentColor,
+                                color: widget.accentColor,
                               ),
                             ),
                           ],
@@ -97,24 +128,28 @@ class ProgressHeader extends StatelessWidget {
           ),
           const SizedBox(width: 24),
           
-          // Title & Subtitle (Right)
+          // Title & Subtitle (Middle)
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w900,
-                    color: AppColors.textPrimary,
-                    letterSpacing: 0.5,
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    widget.title,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      color: AppColors.textPrimary,
+                      letterSpacing: 0.5,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  subtitle.toUpperCase(),
+                  widget.subtitle.toUpperCase(),
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.bold,
@@ -123,6 +158,21 @@ class ProgressHeader extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+          ),
+
+          // Lottie Animation (Right)
+          SizedBox(
+            width: 60,
+            height: 60,
+            child: Lottie.asset(
+              'lib/assets/flutter/tree_growth.json',
+              controller: _lottieController,
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) {
+                print("Lottie Error: $error");
+                return const Icon(Icons.error, color: Colors.red);
+              },
             ),
           ),
         ],

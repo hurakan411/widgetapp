@@ -240,30 +240,25 @@ class SupabaseService {
       final hour = task.resetValue! ~/ 100;
       final minute = task.resetValue! % 100;
       
-      // Today's reset time
+      // Today's reset time (Local)
       final resetTimeToday = DateTime(now.year, now.month, now.day, hour, minute);
+      final doneAtLocal = task.doneAt!.toLocal();
+      
+      print("[DailyReset] Task: ${task.title}, DoneAt: $doneAtLocal, ResetTime: $resetTimeToday");
       
       // If now is past reset time
       if (now.isAfter(resetTimeToday)) {
         // If doneAt is before reset time, it means it was done in the previous cycle
-        if (task.doneAt!.isBefore(resetTimeToday)) {
+        if (doneAtLocal.isBefore(resetTimeToday)) {
+          print("[DailyReset] Resetting ${task.title} (Reason: Done before today's reset time)");
           await resetTaskStatus(task.id);
         }
       } else {
         // If now is before reset time (e.g. 02:00, reset at 04:00)
-        // Check if doneAt is before YESTERDAY's reset time?
-        // No, if it's not reset time yet, we don't reset.
-        // Wait, what if I didn't open the app yesterday?
-        // Example: Reset 04:00. Now 03:00 (Day 2). Done at 23:00 (Day 0).
-        // Yesterday's reset was 04:00 (Day 1).
-        // It should have been reset at 04:00 (Day 1).
-        
-        // Logic: Find the *latest* reset time that has passed.
-        // If doneAt is before that time, reset.
-        
         final resetTimeYesterday = resetTimeToday.subtract(const Duration(days: 1));
         if (now.isAfter(resetTimeYesterday)) {
-             if (task.doneAt!.isBefore(resetTimeYesterday)) {
+             if (doneAtLocal.isBefore(resetTimeYesterday)) {
+                print("[DailyReset] Resetting ${task.title} (Reason: Done before yesterday's reset time)");
                 await resetTaskStatus(task.id);
              }
         }

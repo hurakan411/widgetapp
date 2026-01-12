@@ -75,6 +75,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final Set<String> _deletingTaskIds = {}; // Track tasks currently animating out
   final Set<String> _confirmedTaskIds = {}; // Track tasks optimistically confirmed
   int _refreshKey = 0; // Key to force stream recreation
+  
+  List<Task> _myTasksCache = [];
+  Map<String, List<Task>> _partnerTasksCache = {};
 
   @override
   void initState() {
@@ -319,10 +322,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     for (int i = 0; i < _partnerIds.length; i++) {
       await HomeWidget.saveWidgetData('partner_id_$i', _partnerIds[i]);
+      final name = _partnerNames[_partnerIds[i]] ?? "Partner ${i+1}";
+      await HomeWidget.saveWidgetData('partner_name_$i', name);
     }
 
     // Fetch my tasks
     final myTasks = await _supabaseService.getTasksOnce();
+    _myTasksCache = myTasks;
     
     // Debug: Show actual DB state
     for (var t in myTasks) {
@@ -340,6 +346,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     for (int i = 0; i < _partnerIds.length; i++) {
       final pid = _partnerIds[i];
       final pTasks = await _supabaseService.getPartnerTasksOnce(pid);
+      _partnerTasksCache[pid] = pTasks;
       
       // Debug: Show partner task DB state
       print("Partner $pid tasks from DB:");
@@ -495,8 +502,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       const SizedBox(height: 16),
                     ],
                     
-                    // Partner Selection
-                    if ((partnerId == null || isEditing) && _partnerIds.isNotEmpty) ...[
+                    // Partner Selection (removed - all tasks are now auto-shared)
+                    /*if ((partnerId == null || isEditing) && _partnerIds.isNotEmpty) ...[
                       Container(
                         decoration: AppStyles.neumorphicConvex.copyWith(
                           borderRadius: BorderRadius.circular(12),
@@ -536,7 +543,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ),
                       ),
                       const SizedBox(height: 32),
-                    ],
+                    ],*/
 
                     // Actions
                     Row(
@@ -585,7 +592,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 if (isEditing) {
                                   _editTask(taskToEdit!.id, controller.text, resetType, resetValue);
                                 } else {
-                                  _addTask(controller.text, selectedTargetPartner, resetType, resetValue);
+                                  _addTask(controller.text, null, resetType, resetValue);
                                 }
                                 Navigator.pop(context);
                               }
@@ -749,121 +756,124 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           
           return AlertDialog(
             backgroundColor: AppColors.background,
-            title: const Text('Manage Partners', style: TextStyle(color: AppColors.textPrimary)),
+            title: const Text('パートナー管理', style: TextStyle(color: AppColors.textPrimary)),
             content: SizedBox(
               width: double.maxFinite,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_partnerIds.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(8.0),
-                      child: Text("No partners added yet.", style: TextStyle(color: AppColors.textSecondary)),
-                    )
-                  else
-                    ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: _partnerIds.length,
-                      itemBuilder: (context, index) {
-                        final pid = _partnerIds[index];
-                        final name = _partnerNames[pid] ?? "No Name";
-                        return ListTile(
-                          title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text("ID: ${pid.substring(0, 8)}..."),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              // Edit nickname button
-                              IconButton(
-                                icon: const Icon(Icons.edit, size: 20),
-                                onPressed: () {
-                                  Navigator.pop(context);
-                                  _showEditPartnerDialog(pid, name);
-                                },
-                              ),
-                              // Delete button
-                              IconButton(
-                                icon: const Icon(Icons.delete, size: 20, color: Colors.red),
-                                onPressed: () {
-                                  Navigator.pop(context);
-                                  _showDeletePartnerDialog(pid, name);
-                                },
-                              ),
-                            ],
-                          ),
-                          onTap: () {
-                            Navigator.pop(context);
-                            _showEditPartnerDialog(pid, name);
-                          },
-                        );
-                      },
-                    ),
-                  const SizedBox(height: 16),
-                  // Only show add form if less than 2 partners
-                  if (_partnerIds.length < 2) ...[
-                    const Divider(),
-                    const Text("Add New Partner", style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: idController,
-                      decoration: const InputDecoration(
-                        labelText: 'Partner ID',
-                        border: OutlineInputBorder(),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_partnerIds.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.all(8.0),
+                        child: Text("パートナーがまだ追加されていません。", style: TextStyle(color: AppColors.textSecondary)),
+                      )
+                    else
+                      ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: _partnerIds.length,
+                        itemBuilder: (context, index) {
+                          final pid = _partnerIds[index];
+                          final name = _partnerNames[pid] ?? "名前なし";
+                          return ListTile(
+                            title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                            subtitle: Text("ID: ${pid.substring(0, 8)}..."),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // Edit nickname button
+                                IconButton(
+                                  icon: const Icon(Icons.edit, size: 20),
+                                  onPressed: () {
+                                    Navigator.pop(context);
+                                    _showEditPartnerDialog(pid, name);
+                                  },
+                                ),
+                                // Delete button
+                                IconButton(
+                                  icon: const Icon(Icons.delete, size: 20, color: Colors.red),
+                                  onPressed: () {
+                                    Navigator.pop(context);
+                                    _showDeletePartnerDialog(pid, name);
+                                  },
+                                ),
+                              ],
+                            ),
+                            onTap: () {
+                              Navigator.pop(context);
+                              _showEditPartnerDialog(pid, name);
+                            },
+                          );
+                        },
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: nameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Nickname (Optional)',
-                        hintText: 'e.g. Mom',
-                        border: OutlineInputBorder(),
+                    const SizedBox(height: 16),
+                    // Only show add form if less than 2 partners
+                    if (_partnerIds.length < 2) ...[
+                      const Divider(),
+                      const Text("新しいパートナーを追加", style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: idController,
+                        decoration: const InputDecoration(
+                          labelText: 'パートナーID',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.vintageNavy),
-                      onPressed: () async {
-                        if (idController.text.isNotEmpty) {
-                          if (_partnerIds.contains(idController.text)) {
-                            return;
-                          }
-                          
-                          try {
-                            // Add partner via Supabase
-                            await _supabaseService.addPartner(idController.text);
-                            
-                            // Save nickname locally if provided
-                            if (nameController.text.isNotEmpty) {
-                              final prefs = await SharedPreferences.getInstance();
-                              await prefs.setString('partner_nickname_${idController.text}', nameController.text);
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: nameController,
+                        decoration: const InputDecoration(
+                          labelText: 'ニックネーム（任意）',
+                          hintText: '例: ママ',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: AppColors.vintageNavy),
+                        onPressed: () async {
+                          if (idController.text.isNotEmpty) {
+                            if (_partnerIds.contains(idController.text)) {
+                              return;
                             }
-
-                            // Reload partners
-                            await _loadPartners();
-                            _syncToWidget();
                             
-                            setDialogState(() {
-                              idController.clear();
-                              nameController.clear();
-                            });
-                          } catch (e) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('無効なPartner IDです。')),
-                            );
+                            try {
+                              // Add partner via Supabase
+                              await _supabaseService.addPartner(idController.text);
+                              
+                              // Save nickname locally if provided
+                              if (nameController.text.isNotEmpty) {
+                                final prefs = await SharedPreferences.getInstance();
+                                await prefs.setString('partner_nickname_${idController.text}', nameController.text);
+                              }
+
+                              // Reload partners
+                              await _loadPartners();
+                              _syncToWidget();
+                              
+                              setDialogState(() {
+                                idController.clear();
+                                nameController.clear();
+                              });
+                            } catch (e) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('無効なパートナーIDです。')),
+                              );
+                            }
                           }
-                        }
-                      },
-                      child: const Text('Add Partner', style: TextStyle(color: Colors.white)),
-                    ),
+                        },
+                        child: const Text('パートナーを追加', style: TextStyle(color: Colors.white)),
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
-                child: const Text('Close', style: TextStyle(color: AppColors.textSecondary)),
+                child: const Text('閉じる', style: TextStyle(color: AppColors.textSecondary)),
               ),
             ],
           );
@@ -874,8 +884,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   String _getFormattedDate() {
     final now = DateTime.now();
-    final months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-    return "${months[now.month - 1]} ${now.day}";
+    final month = now.month.toString().padLeft(2, '0');
+    final day = now.day.toString().padLeft(2, '0');
+    return "$month/$day";
   }
 
   Widget _buildTaskPage({
@@ -891,11 +902,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ? _supabaseService.getPartnerTasksStream(partnerId!) 
         : (_myTasksStream ?? const Stream.empty());
 
+    // Get initial data from cache
+    final List<Task>? initialData = isPartnerPage 
+        ? _partnerTasksCache[partnerId!] 
+        : _myTasksCache;
+
     return StreamBuilder<List<Task>>(
       key: ValueKey('${partnerId ?? "my"}_$_refreshKey'),
       stream: stream,
+      initialData: initialData,
       builder: (context, snapshot) {
-        final tasks = snapshot.data ?? [];
+        final tasks = snapshot.data ?? initialData ?? [];
+        
+        // Update cache when new data arrives
+        if (snapshot.hasData) {
+          if (isPartnerPage) {
+            _partnerTasksCache[partnerId!] = snapshot.data!;
+          } else {
+            _myTasksCache = snapshot.data!;
+          }
+        }
         
         // Calculate Progress
         double progress = 0.0;
@@ -1073,7 +1099,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   // Partner Pages
                   ..._partnerIds.map((pid) => _buildTaskPage(
                     title: _partnerNames[pid] ?? "PARTNER",
-                    subtitle: "PARTNER'S TASKS",
+                    subtitle: _getFormattedDate(),
                     partnerId: pid,
                     accentColor: AppColors.terracotta,
                     isPartnerPage: true,
@@ -1138,18 +1164,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         children: [
           Icon(Icons.person_add, size: 60, color: AppColors.textSecondary.withOpacity(0.5)),
           const SizedBox(height: 20),
-          Text(
-            _partnerIds.isEmpty ? "No Partner Set" : "Add Another Partner",
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textSecondary),
-          ),
-          const SizedBox(height: 20),
+          if (_partnerIds.isEmpty)
+            Text(
+              "パートナーが設定されていません",
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textSecondary),
+            ),
+          if (_partnerIds.isEmpty) const SizedBox(height: 20),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.vintageNavy,
               padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
             ),
             onPressed: _showPartnerManagementDialog,
-            child: const Text("Add Partner", style: TextStyle(color: Colors.white)),
+            child: const Text("パートナーを追加", style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
